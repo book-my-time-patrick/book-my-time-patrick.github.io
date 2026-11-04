@@ -1,0 +1,51 @@
+name: 验证并部署 GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: 校验线上 API 地址
+        if: vars.VITE_API_BASE_URL != ''
+        run: node scripts/check-production-url.mjs
+      - run: npm run build
+      - uses: actions/configure-pages@v5
+        if: vars.VITE_API_BASE_URL != ''
+      - uses: actions/upload-pages-artifact@v3
+        if: vars.VITE_API_BASE_URL != ''
+        with:
+          path: dist
+  deploy:
+    needs: build
+    if: vars.VITE_API_BASE_URL != '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署
+        id: deployment
+        uses: actions/deploy-pages@v4

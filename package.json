@@ -1,0 +1,41 @@
+{
+  "name": "invited-booking",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:api": "wrangler dev --config wrangler.local.jsonc --ip 127.0.0.1 --port 8787 --local --persist-to .local/worker-state",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "build": "npm run check && vite build && npm run build:server",
+    "build:server": "esbuild server/node.ts --bundle --platform=node --format=esm --packages=external --outfile=build/server.js",
+    "start": "node --env-file-if-exists=.env build/server.js",
+    "configure:worker": "node scripts/configure-worker.mjs",
+    "deploy:api": "wrangler deploy --config .local/wrangler.production.jsonc",
+    "probe:auth": "node scripts/probe-auth.mjs",
+    "probe:worker": "wrangler dev --config probes/wrangler.jsonc --ip 127.0.0.1 --port 8788 --local",
+    "probe:cloud:preflight": "node scripts/cloudflare-preflight.mjs",
+    "probe:cloud": "node scripts/probe-cloud.mjs",
+    "dry-run:api": "wrangler deploy --config wrangler.local.jsonc --dry-run --outdir .local/worker-build"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.6",
+    "hono": "4.13.16"
+  },
+  "devDependencies": {
+    "@noble/hashes": "2.4.0",
+    "@types/node": "^22.0.0",
+    "argon2id": "1.0.1",
+    "esbuild": "0.28.2",
+    "tsx": "^4.20.0",
+    "typescript": "7.0.2",
+    "undici": "7.30.1",
+    "vite": "8.3.5",
+    "wrangler": "4.157.0"
+  }
+}

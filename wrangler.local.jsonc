@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "invited-booking-api-local",
+  "main": "server/worker.ts",
+  "compatibility_date": "2026-11-04",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "vars": { "FRONTEND_ORIGIN": "http://127.0.0.1:5173" }
+}
