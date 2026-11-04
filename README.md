@@ -46,7 +46,7 @@ GitHub Pages 只托管静态资源，邀请令牌放在 URL 的 `#` 后。API �
 
 需要一个你可管理的 GitHub 仓库、Cloudflare 账号，以及一个 DNS 已交给 Cloudflare 管理的自有域名。Pages 入口可以保持 `你的账号.github.io`，自有域名只给 API 使用。
 
-当前关联仓库为 `vincent-mar/check-my-time-patrick.github.io`，它属于项目站。部署后的入口为 `https://vincent-mar.github.io/check-my-time-patrick.github.io/`，邀请与检查的 hash 路由接在这个路径后。CORS 的前端源仍填写 `https://vincent-mar.github.io`。
+站点仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，组织与仓库均已创建。正式发布后的分享入口为 `https://book-my-time-patrick.github.io/`，邀请与检查的 hash 路由接在这个地址后。API 的 CORS 前端源填写 `https://book-my-time-patrick.github.io`。API 使用独立的自有域名，与免费分享地址分别配置。
 
 GitHub 免费计划下通常使用公开代码仓库。发布前确认仓库中只有代码，`.env`、凭据、实际邀请和日历文件均不能提交。GitHub Pages 仓库是否私有与网站的邀请门禁是两件事。
 
@@ -68,7 +68,7 @@ npx wrangler whoami
 把示例域名替换成你的真实域名。第一个参数只填写前端的源，即协议加域名，不含仓库路径。即使前端在 `/仓库名/` 下，CORS 的源仍是 `https://你的账号.github.io`。
 
 ```bash
-npm run configure:worker -- https://your-account.github.io https://api.your-domain.com
+npm run configure:worker -- https://book-my-time-patrick.github.io https://api.your-domain.com
 npm run deploy:api
 ```
 
@@ -94,7 +94,7 @@ API 与前端资源均设置禁止索引。Workers 关闭请求观测日志，�
 
 没有设置该仓库变量时，工作流只执行检查和构建，跳过网站发布。设置非空值后会先检查地址格式，格式无效则阻止发布。API 域名必须使用 HTTPS。不要填 `workers.dev`、`localhost`、邀请链接或任何账号密码。
 
-GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件或 `.local/`。管理员密码表单在 M1 放到 API 域名下，保持登录会话同源。
+GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件或 `.local/`。管理员通行密钥登录界面在 M1 放到 API 域名下，保持登录会话同源。
 
 ## 可达性自检
 

@@ -4,6 +4,8 @@ build/
 .local/
 .wrangler/
 .sites-runtime/
+prompt.md
+PROMPT.md
 .env
 .env.*
 !.env.example
