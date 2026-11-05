@@ -12,11 +12,17 @@
 | 同一套 API 在 Workers 与 Node 中运行 | 已实现 |
 | GitHub Pages 工作流、Workers 配置生成、同域 Docker 配置 | 已提供 |
 | 登录可行性 | Argon2id 的两种实现线上反复触发 1102。通行密钥验签、TOTP、组合核心验证各 12/12 通过，完整登录流程待 M1 |
-| 真实 Pages、API 部署和大陆三网访问 | 等待仓库、Cloudflare 登录和 API 自有域名 |
-| iCloud / Outlook 授权及读取 | 等待后续接入验证 |
-| 登录、有效邀请、预约、邮箱与真实日历 | M1–M4 实现 |
+| GitHub 仓库、Pages 与 Cloudflare 授权 | 已完成，中性首页与前端自检已上线 |
+| API 自有域名 | 已在阿里云注册 `book-my-time-patrick.cn`，Cloudflare 已激活，`api.book-my-time-patrick.cn` 已绑定 Worker |
+| 正式 API 与前端联调 | 已部署并通过 HTTPS、CORS、安全头与静态产物检查；真实设备网络测试待完成 |
+| 大陆三网访问 | 待真实网络实测并导出 CSV |
+| 登录与有效邀请 | M1 实现，当前尚未开放 |
+| 邮箱与申请邮件 | M2 实现 |
+| iCloud / Outlook 忙闲读取 | M3 实现，独立只读授权途径待核实 |
 
 M0 所有邀请入口显示统一不可用页。根路径不会请求个人资料或日历。公开的 `#/check` 页面只测试固定连通性信号，不展示个人内容。API 健康检查通过仅说明 API 可用，不代表日历已经同步。
+
+分享入口为 [受邀预约](https://book-my-time-patrick.github.io/)，网络测试使用 [可达性自检](https://book-my-time-patrick.github.io/#/check)。最新部署与验证结果见 [M0 线上验证记录](docs/M0-线上验证记录.md)。
 
 ## 本机演示
 
@@ -46,7 +52,9 @@ GitHub Pages 只托管静态资源，邀请令牌放在 URL 的 `#` 后。API �
 
 需要一个你可管理的 GitHub 仓库、Cloudflare 账号，以及一个 DNS 已交给 Cloudflare 管理的自有域名。Pages 入口可以保持 `你的账号.github.io`，自有域名只给 API 使用。
 
-站点仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，组织与仓库均已创建。正式发布后的分享入口为 `https://book-my-time-patrick.github.io/`，邀请与检查的 hash 路由接在这个地址后。API 的 CORS 前端源填写 `https://book-my-time-patrick.github.io`。API 使用独立的自有域名，与免费分享地址分别配置。
+站点仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，组织与仓库均已创建，Pages 中性首页已经发布。分享入口为 `https://book-my-time-patrick.github.io/`，邀请与检查的 hash 路由接在这个地址后。API 的 CORS 前端源填写 `https://book-my-time-patrick.github.io`。
+
+自有域名 `book-my-time-patrick.cn` 已在阿里云注册，权威 DNS 已交给 Cloudflare，域名状态为 Active。正式 API 为 `https://api.book-my-time-patrick.cn/api`，Pages 已使用该地址重新构建发布。HTTPS、精确前端源的 CORS、跨域预检和业务接口关闭均已通过 HTTP 检查。
 
 GitHub 免费计划下通常使用公开代码仓库。发布前确认仓库中只有代码，`.env`、凭据、实际邀请和日历文件均不能提交。GitHub Pages 仓库是否私有与网站的邀请门禁是两件事。
 
@@ -54,7 +62,7 @@ GitHub 免费计划下通常使用公开代码仓库。发布前确认仓库中�
 
 ### 2. 官方登录
 
-在自己的电脑运行。授权页面由 Cloudflare 打开，凭据由工具保管。
+本项目已在当前电脑完成 Cloudflare 官方登录。更换电脑或需要重新授权时运行下列命令，授权页面由 Cloudflare 打开，凭据由工具保管。
 
 ```bash
 npx wrangler login
@@ -65,16 +73,16 @@ npx wrangler whoami
 
 ### 3. 生成并部署 API 配置
 
-把示例域名替换成你的真实域名。第一个参数只填写前端的源，即协议加域名，不含仓库路径。即使前端在 `/仓库名/` 下，CORS 的源仍是 `https://你的账号.github.io`。
+以下命令使用本项目的分享地址与已选定的 API 域名。第一个参数只填写前端的源，即协议加域名，不含仓库路径。即使前端在 `/仓库名/` 下，CORS 的源仍是 `https://你的账号.github.io`。
 
 ```bash
-npm run configure:worker -- https://book-my-time-patrick.github.io https://api.your-domain.com
+npm run configure:worker -- https://book-my-time-patrick.github.io https://api.book-my-time-patrick.cn
 npm run deploy:api
 ```
 
 配置保存到忽略提交的 `.local/wrangler.production.jsonc`。默认关闭 `workers.dev` 和预览地址，只绑定指定自有域名。当前不创建数据库、不接入个人日历。D1 在 M1 需要真实持久化时再配置。
 
-打开部署后的 `https://api.your-domain.com/api/health`。成功时应返回以下固定内容。
+打开部署后的 `https://api.book-my-time-patrick.cn/api/health`。成功时应返回以下固定内容。
 
 ```json
 {"ok":true,"service":"invite-api"}
@@ -86,7 +94,7 @@ API 与前端资源均设置禁止索引。Workers 关闭请求观测日志，�
 
 1. 将代码提交到 GitHub 仓库的 `main` 分支。
 2. 进入仓库 Settings → Pages，将 Source 选为 GitHub Actions。
-3. API 部署后，进入 Settings → Secrets and variables → Actions → Variables，新增 `VITE_API_BASE_URL`，值为 `https://api.your-domain.com/api`。这是公开配置。
+3. API 部署后，进入 Settings → Secrets and variables → Actions → Variables，新增 `VITE_API_BASE_URL`，值为 `https://api.book-my-time-patrick.cn/api`。这是公开配置。
 4. 在 Actions 中手动运行「验证并部署 GitHub Pages」，或推送到 `main` 触发。
 5. 使用工作流输出的 Pages 地址打开首页，再打开同一地址后的 `#/check`。
 
@@ -152,7 +160,7 @@ npm run probe:cloud -- --lightweight
 
 ## 后台登录与多设备体验
 
-后台支持 iPhone、Mac、Windows 10 和 Windows 11，使用同一个管理员账号。各设备可以分别注册通行密钥，后台可查看并撤销某一设备的登录。移动端与桌面端均能管理日历来源、邮箱、预约、邀请、规则与展示内容，分里程碑实现。
+M1 计划让后台支持 iPhone、Mac、Windows 10 和 Windows 11，使用同一个管理员账号。各设备可以分别注册通行密钥，后台可查看并撤销某一设备的登录。当前只有密码学核心可行性验证，完整登录与真实设备测试尚待实现。移动端与桌面端的日历来源、邮箱、预约、邀请、规则与展示管理按后续里程碑交付。
 
 - iPhone 可通过 Face ID 或设备解锁方式使用通行密钥。Mac 可使用系统提供的验证方式，也提供附近手机扫码路径。开启同一 Apple 账户的 iCloud 钥匙串后，两端可以同步通行密钥。
 - Windows 10/11 可在支持的 Edge、Chrome 中使用 Windows Hello，按设备能力提供 PIN、指纹或人脸。优先允许每台常用电脑保存自己的通行密钥。
@@ -176,7 +184,7 @@ M1 包含「登录设备」管理页。列表按浏览器登录会话展示设�
 
 私人来源是 iCloud 中勾选的个人日历，工作 Outlook 当前通过订阅在 Apple 日历可见。两者均参与忙闲计算。多设备同步成功与允许本站读取忙闲需要分别验证。
 
-后续接入需要完成以下检查，使用虚构日程即可。
+这些检查用于提前确认 M3 接入方案，可使用虚构日程。M0 的验收范围是项目骨架、真实 Pages 与 API 联通、中性入口、可达性自检和同域切换能力；真实日历读取在 M3 验收，邮箱管理与申请邮件在 M2 验收。
 
 - 核实单位账户是 M365 国际版、世纪互联还是本地 Exchange，并在组织允许的范围内进行独立只读授权。
 - 验证 iCloud 能否只返回必要的忙闲字段。不要默认拉取完整事件后再删除标题。
@@ -218,7 +226,7 @@ npm start
 cp .env.example .env
 ```
 
-编辑 `.env` 中的 `SITE_DOMAIN` 为真实域名，例如 `booking.your-domain.com`，不带协议。然后运行。
+编辑 `.env` 中的 `SITE_DOMAIN` 为备用部署的真实域名，例如 `booking.book-my-time-patrick.cn`，不带协议。该子域名需另行解析到香港服务器。然后运行。
 
 ```bash
 docker compose config
@@ -226,7 +234,9 @@ docker compose up -d --build
 docker compose logs --tail=50
 ```
 
-Caddy 自动申请 HTTPS 证书。通过 `https://你的域名/#/check` 验证。该方案前端和 API 同域，保留同一套邀请入口格式。Caddy 配置没有开启访问日志。证书卷需要在迁移服务器时保留。M0 无个人业务数据库，数据库自动备份将在持久化里程碑中加入。
+Caddy 自动申请 HTTPS 证书。若使用上述示例域名，通过 `https://booking.book-my-time-patrick.cn/#/check` 验证。该方案前端和 API 同域，保留同一套邀请入口格式。Caddy 配置没有开启访问日志。证书卷需要在迁移服务器时保留。M0 无个人业务数据库，数据库自动备份将在持久化里程碑中加入。
+
+本机已验证 Node 同域入口。Docker/Caddy 配置尚待实际运行验证，备用香港服务器的正式部署属于可选项。
 
 ## 检查命令与排错
 
