@@ -1,6 +1,7 @@
 import './admin.css';
 import { startAuthentication, startRegistration, WebAuthnAbortService } from '@simplewebauthn/browser';
 import { copyText, escapeHtml as e, formatTime, modeNames, moduleNames } from './ui';
+import { createSetupQr } from './qr';
 
 type Time = string | number;
 type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
@@ -60,6 +61,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   let setupToken = /^#\/admin\/setup\/([A-Za-z0-9_-]{32,256})$/.exec(location.hash)?.[1] ?? '';
   let setup: Setup | null = null;
   let currentDialog: HTMLDialogElement | null = null;
+  let setupSuccessVisible = false;
   const recentLinks = new Map<string, string>();
   const rootIsCurrent = (version: number) => alive && revision === version;
 
@@ -78,7 +80,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   function clearPrivate() {
     identityVersion += 1;
-    me = null; setup = null; recentLinks.clear();
+    me = null; setup = null; recentLinks.clear(); setupSuccessVisible = false;
     currentDialog?.close(); currentDialog?.remove(); currentDialog = null;
     WebAuthnAbortService.cancelCeremony();
   }
@@ -123,7 +125,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   function showLogin(message = '', configured = true) {
     me = null; setup = null; recentLinks.clear();
-    shell(`<section class="admin-auth"><p class="eyebrow">YOUR PRIVATE DESK</p><h1>欢迎回来。</h1><p class="admin-copy">使用这台设备的通行密钥，或按系统提示通过手机验证。无需输入账号和密码。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><section class="admin-card">${configured ? `<form id="login-form"><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="这台设备" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 30 天</label><button class="primary" type="submit">使用通行密钥登录 <span aria-hidden="true">↗</span></button></form><p class="admin-help">Face ID、Touch ID、Windows Hello 或系统提供的手机验证方式均由设备处理。动态码来自你绑定的身份验证器。手机扫码可能需要一些时间；若动态码已刷新，请取新码重新尝试。</p>` : '<h2>后台尚未初始化</h2><p class="admin-copy">请使用单独提供的初始化码，绑定第一把通行密钥与身份验证器。后台网址本身不授予注册权限。</p>'}</section></section>`);
+    shell(`<section class="admin-auth"><p class="eyebrow">YOUR PRIVATE DESK</p><h1>欢迎回来。</h1><p class="admin-copy">使用这台设备的通行密钥，或按系统提示通过手机验证。无需输入账号和密码。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><section class="admin-card">${configured ? `<form id="login-form"><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="这台设备" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 6 个月</label><button class="primary" type="submit">使用通行密钥登录 <span aria-hidden="true">↗</span></button></form><p class="admin-help">Face ID、Touch ID、Windows Hello 或系统提供的手机验证方式均由设备处理。动态码来自你绑定的身份验证器。手机扫码可能需要一些时间；若动态码已刷新，请取新码重新尝试。</p>` : '<h2>后台尚未初始化</h2><p class="admin-copy">请使用单独提供的初始化码，绑定第一把通行密钥与身份验证器。后台网址本身不授予注册权限。</p>'}</section></section>`);
     banner(message, Boolean(message && message !== '已退出这台设备。'));
     const form = root.querySelector<HTMLFormElement>('#login-form');
     form?.addEventListener('submit', (event) => {
@@ -159,7 +161,16 @@ export function renderAdmin(root: HTMLElement): () => void {
         setup = await request<Setup>('/admin/setup/options', { setupToken });
         if (!rootIsCurrent(version)) { setup = null; return; }
         const card = root.querySelector<HTMLElement>('#setup-card')!;
-        card.innerHTML = `<h2>01 · 添加身份验证器</h2><p class="admin-copy">在身份验证器中选择「手动输入设置密钥」，账户可填「受邀预约」，使用下方密钥与基于时间的六位验证码。</p><div class="admin-seed" id="setup-secret"></div><div class="admin-actions"><button class="secondary" type="button" id="copy-secret">复制设置密钥</button><button class="text-button" type="button" id="copy-otpauth">复制验证器链接</button></div><p class="admin-help">请在 5 分钟内完成。设置密钥仅在本次设置中显示，不要发送给他人。</p><hr class="admin-divider"><h2>02 · 保存通行密钥</h2><form id="setup-form"><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="我的第一台设备" autocomplete="off" required></label><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 30 天</label><button class="primary" type="submit">保存通行密钥并完成设置 <span aria-hidden="true">↗</span></button></form>`;
+        card.innerHTML = `<h2>01 · 扫码绑定身份验证器</h2><p class="admin-copy">用身份验证器扫描下方二维码，获取六位动态码。Microsoft Authenticator 中选择「添加账户 → 其他账户」后扫码。</p><div class="admin-setup-qr" id="setup-qr" role="status" aria-live="polite">正在生成二维码…</div><p class="admin-help">二维码在当前浏览器生成，不会将设置密钥发送给外部二维码服务。</p><details class="admin-setup-manual" id="setup-manual"><summary>无法扫码？手动添加</summary><p class="admin-copy">如果正在同一部手机上设置，可复制下方设置密钥，在身份验证器中手动添加，账户名称填写「受邀预约」。</p><div class="admin-seed" id="setup-secret"></div><div class="admin-actions"><button class="secondary" type="button" id="copy-secret">复制设置密钥</button><button class="text-button" type="button" id="copy-otpauth">复制验证器链接</button></div></details><p class="admin-help">请在 5 分钟内完成。二维码与设置密钥只在本次设置中显示，不要发送给他人。</p><hr class="admin-divider"><h2>02 · 保存通行密钥</h2><form id="setup-form"><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="我的第一台设备" autocomplete="off" required></label><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 6 个月</label><button class="primary" type="submit">保存通行密钥并完成设置 <span aria-hidden="true">↗</span></button></form>`;
+        const currentSetup = setup;
+        const qr = card.querySelector<HTMLElement>('#setup-qr')!;
+        void createSetupQr(currentSetup.totpUri).then((image) => {
+          if (rootIsCurrent(version) && setup === currentSetup && qr.isConnected) qr.replaceChildren(image);
+        }).catch(() => {
+          if (!rootIsCurrent(version) || setup !== currentSetup || !qr.isConnected) return;
+          qr.textContent = '二维码暂时无法生成，请使用下方设置密钥手动添加。';
+          card.querySelector<HTMLDetailsElement>('#setup-manual')!.open = true;
+        });
         card.querySelector('#setup-secret')!.textContent = setup.totpSecret;
         card.querySelector('#copy-secret')!.addEventListener('click', () => void copySetup(false));
         card.querySelector('#copy-otpauth')!.addEventListener('click', () => void copySetup(true));
@@ -174,17 +185,22 @@ export function renderAdmin(root: HTMLElement): () => void {
             const remember = new FormData(form).has('remember');
             banner('请按照系统提示保存通行密钥。');
             let registered = false;
+            let saved = false;
             try {
               const response = await startRegistration({ optionsJSON: currentSetup.options });
               registered = true;
               await request('/admin/setup/verify', { flowId: currentSetup.flowId, response, code, deviceName, remember });
+              saved = true;
               setup = null; setupToken = ''; form.reset();
+              card.replaceChildren();
+              const confirming = document.createElement('p'); confirming.className = 'admin-copy'; confirming.textContent = '正在确认管理会话…'; card.append(confirming);
               history.replaceState(null, '', '#/admin');
               me = await request<Me>('/admin/me');
-              showDashboard();
-              banner('设置完成。建议在另一台常用设备上再添加一把通行密钥。');
+              if (rootIsCurrent(version)) showSetupSuccess();
             } catch (error) {
-              if (registered && alive) { setup = null; showSetup(); banner('本次设置未完成，请重新开始并使用新生成的验证器密钥。', true); }
+              if (!rootIsCurrent(version) || error instanceof StaleRequestError) return;
+              if (saved) { me = null; showSavedSetupConfirmation(error); }
+              else if (registered) { setup = null; showSetup(); banner('本次设置未完成，请重新开始并使用新生成的验证器密钥。', true); }
               else throw error;
             }
           }, form.querySelector<HTMLButtonElement>('button')!);
@@ -192,9 +208,48 @@ export function renderAdmin(root: HTMLElement): () => void {
       }, startForm.querySelector<HTMLButtonElement>('button')!);
     });
   }
+  function showSetupSuccess() {
+    if (!alive || !me) return;
+    const sessionId = me.session.id;
+    const version = shell('<section class="admin-auth"><p class="eyebrow">SETUP COMPLETE</p><h1>设置已完成。</h1><p class="admin-copy">确认后即可进入管理后台。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div></section>');
+    setupSuccessVisible = true;
+    const dialog = document.createElement('dialog'); currentDialog = dialog;
+    dialog.className = 'admin-dialog admin-setup-success';
+    dialog.setAttribute('aria-labelledby', 'setup-success-title');
+    dialog.setAttribute('aria-describedby', 'setup-success-copy');
+    dialog.innerHTML = '<div class="admin-setup-success-mark" aria-hidden="true">✓</div><h2 id="setup-success-title">绑定成功</h2><p class="admin-copy" id="setup-success-copy">通行密钥和身份验证器已绑定，可以进入后台管理邀请和登录设备。</p><p class="admin-help">建议在另一台常用设备上再添加一把通行密钥。</p><div class="admin-actions admin-dialog-actions"><button class="primary" type="button" autofocus>进入后台</button></div>';
+    dialog.querySelector('button')!.addEventListener('click', () => dialog.close());
+    dialog.addEventListener('close', () => {
+      const current = currentDialog === dialog;
+      if (current) { currentDialog = null; setupSuccessVisible = false; }
+      dialog.remove();
+      if (current && rootIsCurrent(version) && me?.session.id === sessionId) showDashboard();
+    }, { once: true });
+    root.append(dialog); dialog.showModal();
+    dialog.querySelector<HTMLButtonElement>('button')!.focus();
+  }
+  function showSavedSetupConfirmation(error: unknown) {
+    const version = shell(`<section class="admin-auth"><p class="eyebrow">CONFIRM YOUR SESSION</p><h1>请重新确认连接。</h1><p class="admin-copy">绑定信息已经保存，暂时未能确认登录状态。无需再次扫码绑定，请重新连接后台。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><button class="secondary" id="confirm-saved-setup" type="button">重新连接后台</button></section>`);
+    banner(messageFor(error), true);
+    const button = root.querySelector<HTMLButtonElement>('#confirm-saved-setup')!;
+    button.addEventListener('click', () => void action(async () => {
+      try {
+        const current = await request<Me>('/admin/me');
+        if (rootIsCurrent(version)) { me = current; showSetupSuccess(); }
+      } catch (failure) {
+        if (!rootIsCurrent(version) || failure instanceof StaleRequestError) return;
+        if (failure instanceof ApiError && failure.status === 401) {
+          clearPrivate(); showLogin('绑定信息已保存，请使用通行密钥和新的动态码登录。');
+        } else throw failure;
+      }
+    }, button));
+  }
   async function copySetup(uri: boolean) {
     if (!setup) return;
-    const copied = await copyText(uri ? setup.totpUri : setup.totpSecret);
+    const currentSetup = setup;
+    const version = revision;
+    const copied = await copyText(uri ? currentSetup.totpUri : currentSetup.totpSecret);
+    if (!rootIsCurrent(version) || setup !== currentSetup) return;
     banner(copied ? '已复制。请在身份验证器中添加。' : '浏览器未允许复制，请手动选择设置密钥。', !copied);
   }
   function showDashboard() {
@@ -383,7 +438,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   let checkingSession = false;
   async function checkSession() {
-    if (!alive || !me || checkingSession || document.hidden) return;
+    if (!alive || !me || checkingSession || setupSuccessVisible || document.hidden) return;
     checkingSession = true;
     const version = revision;
     const sessionId = me.session.id;

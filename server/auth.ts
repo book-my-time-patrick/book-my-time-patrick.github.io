@@ -4,6 +4,7 @@ import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthe
 import { decodeClientDataJSON } from '@simplewebauthn/server/helpers';
 import type { AuthenticationResponseJSON, AuthenticatorTransport, RegistrationResponseJSON } from '@simplewebauthn/server';
 import type { Environment, SqlDatabase } from './db.js';
+import { sessionExpiry } from './session-policy.js';
 import { base64url, decryptSecret, encryptSecret, equalText, fromBase64url, hmac, matchingTotpStep, newTotpSecret, randomToken, sha256 } from './security.js';
 
 type C = Context<{ Bindings: Environment }>;
@@ -154,7 +155,7 @@ async function verifyAuthentication(c: C, challenge: Challenge, response: unknow
 function newSession(c: C, credentialId: string, input: Record<string, unknown>) {
   const now = Date.now();
   const device = coarseDevice(c);
-  return { id: crypto.randomUUID(), token: randomToken(), credentialId, label: input.deviceName === undefined ? `${device.os} · ${device.browser}` : text(input.deviceName) || `${device.os} · ${device.browser}`, ...device, now, expiresAt: now + (input.remember === true ? 30 * DAY : DAY / 2) };
+  return { id: crypto.randomUUID(), token: randomToken(), credentialId, label: input.deviceName === undefined ? `${device.os} · ${device.browser}` : text(input.deviceName) || `${device.os} · ${device.browser}`, ...device, now, expiresAt: sessionExpiry(now, input.remember === true) };
 }
 export function mountAuth(app: Hono<{ Bindings: Environment }>) {
   const endpoint = (handler: (c: C) => Promise<Response>) => async (c: C) => {

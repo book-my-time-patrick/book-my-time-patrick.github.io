@@ -93,7 +93,14 @@ test('M1 完整初始化加密保存 TOTP，Cookie 与记住设备期限正确',
   const value = h.setupResponse.headers.get('set-cookie')!;
   for (const expression of [/^__Host-admin_session=/, /HttpOnly/i, /Secure/i, /SameSite=Strict/i, /Path=\//]) assert.match(value, expression);
   const maxAge = Number(value.match(/Max-Age=(\d+)/)?.[1]);
-  assert.ok(maxAge >= 2_591_995 && maxAge <= 2_592_000);
+  const rememberedRow = await h.DB.prepare('SELECT created_at,expires_at FROM sessions').first<{ created_at: number; expires_at: number }>();
+  const created = new Date(rememberedRow!.created_at);
+  const expires = new Date(rememberedRow!.expires_at);
+  assert.equal((expires.getUTCFullYear() - created.getUTCFullYear()) * 12 + expires.getUTCMonth() - created.getUTCMonth(), 6);
+  assert.ok(rememberedRow!.expires_at - rememberedRow!.created_at >= 181 * 86_400_000);
+  assert.ok(rememberedRow!.expires_at - rememberedRow!.created_at <= 184 * 86_400_000);
+  const expectedMaxAge = Math.floor((rememberedRow!.expires_at - rememberedRow!.created_at) / 1000);
+  assert.ok(maxAge >= expectedMaxAge - 5 && maxAge <= expectedMaxAge);
   assert.doesNotMatch(value, /Domain=/i);
   const row = await h.DB.prepare('SELECT token_hash FROM sessions').first<{ token_hash: string }>();
   assert.equal(row!.token_hash, sha256(h.state.cookie.split('=')[1]));
@@ -101,7 +108,7 @@ test('M1 完整初始化加密保存 TOTP，Cookie 与记住设备期限正确',
   assert.match(owner!.totp_cipher, /^v1\./); assert.ok(!owner!.totp_cipher.includes(h.secret));
   const me = await h.request<{ session: SessionView }>('/api/admin/me');
   assert.equal(me.response.status, 200); assert.equal(me.data.session.label, '测试电脑');
-  assert.ok(me.data.session.expiresAt - me.data.session.createdAt <= 30 * 86_400_000);
+  assert.equal(me.data.session.expiresAt, rememberedRow!.expires_at);
   assert.deepEqual((await h.request('/api/admin/status')).data, { configured: true });
   const brief = await configured({ remember: false });
   const briefMe = await brief.request<{ session: SessionView }>('/api/admin/me');

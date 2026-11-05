@@ -107,3 +107,9 @@
 .admin-item form .admin-field { max-width: 360px; margin-bottom: 9px; }
 .admin-dialog-actions { margin-top: 18px; }
 .invitation-retry { margin-top: 24px; }
+.admin-setup-qr { display: grid; place-items: center; width: 240px; max-width: 100%; min-height: 180px; margin: 18px auto 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--muted); font-size: 12px; line-height: 1.8; text-align: center; }
+.admin-setup-qr svg { display: block; width: 240px; max-width: 100%; height: auto; border-radius: 9px; }
+.admin-setup-manual { margin: 18px 0; }
+.admin-setup-manual summary { color: var(--blue); cursor: pointer; font-size: 12px; line-height: 1.8; }
+.admin-setup-success-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; margin-bottom: 17px; background: #edf3ff; color: #315890; font-size: 24px; }
+.admin-setup-success .admin-help { margin-bottom: 20px; }
