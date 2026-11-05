@@ -25,6 +25,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: 验证主站构建
+        run: npm run build:site
       - name: 校验线上 API 地址
         if: vars.VITE_API_BASE_URL != ''
         run: node scripts/check-production-url.mjs

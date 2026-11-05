@@ -18,7 +18,7 @@ export function createCloudflareClient() {
   const dispatcher = new EnvHttpProxyAgent();
 
   async function request(path, options = {}) {
-    if (!path.startsWith('/accounts') && path !== '/graphql' && !path.startsWith('/zones?')) throw new Error('仅允许账号、域名列表或指标查询');
+    if (!path.startsWith('/accounts') && path !== '/graphql' && !path.startsWith('/zones?') && !/^\/zones\/[a-f0-9]{32}\/(?:workers\/routes|ssl\/certificate_packs|bot_management)(?:\/[a-f0-9-]+)?$/.test(path)) throw new Error('仅允许账号、域名列表、测试路由/证书、抓取策略或指标操作');
     const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
       ...options,
       dispatcher,
@@ -26,6 +26,7 @@ export function createCloudflareClient() {
       signal: AbortSignal.timeout(30000),
       headers: { Authorization: `Bearer ${credential.token}`, 'Content-Type': 'application/json' },
     });
+    if (response.ok && response.status === 204) return undefined;
     const data = await response.json();
     if (!response.ok || data.success === false || data.errors?.length) {
       // 不输出完整响应、凭据、请求头或个人信息。

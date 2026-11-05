@@ -13,6 +13,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/build ./build
+COPY --from=build /app/migrations ./migrations
+RUN mkdir /app/data && chown node:node /app/data
+ENV DATABASE_PATH=/app/data/site.sqlite
 USER node
 EXPOSE 3000
 CMD ["node", "build/server.js"]

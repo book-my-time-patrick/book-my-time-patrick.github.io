@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import { AuthError, mountAuth } from './auth.js';
+import { mountInvites } from './invites.js';
+import type { Environment } from './db.js';
 
-export type Environment = { FRONTEND_ORIGIN?: string };
+export type { Environment } from './db.js';
 
 // M0 只暴露无个人信息的连通性探针。未实现的业务接口统一关闭。
 export function createApi() {
@@ -37,11 +41,17 @@ export function createApi() {
     await next();
   });
 
+  app.use('/api/*', bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json({ error: 'INVALID_INPUT' }, 413) }));
+
   app.get('/api/health', (context) => context.json({ ok: true, service: 'invite-api' }));
+  mountAuth(app);
+  mountInvites(app);
   app.all('/api/*', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.all('/api', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.get('/robots.txt', (context) => context.text('User-agent: *\nDisallow: /\n'));
   app.notFound((context) => context.json({ error: 'NOT_FOUND' }, 404));
-  app.onError((_error, context) => context.json({ error: 'SERVICE_UNAVAILABLE' }, 503));
+  app.onError((error, context) => error instanceof AuthError
+    ? context.json({ error: error.code }, error.status as 400 | 401 | 403 | 404 | 409 | 429 | 503)
+    : context.json({ error: 'SERVICE_UNAVAILABLE' }, 503));
   return app;
 }

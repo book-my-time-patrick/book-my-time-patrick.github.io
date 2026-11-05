@@ -4,7 +4,14 @@ services:
     restart: unless-stopped
     environment:
       PORT: '3000'
+      TRUST_PROXY: '1'
       FRONTEND_ORIGIN: https://${SITE_DOMAIN:?请在.env中设置SITE_DOMAIN}
+      SITE_ORIGIN: https://${SITE_DOMAIN:?请在.env中设置SITE_DOMAIN}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?请配置服务端加密密钥}
+      SETUP_TOKEN_HASH: ${SETUP_TOKEN_HASH:-}
+      SETUP_EXPIRES_AT: ${SETUP_EXPIRES_AT:-}
+    volumes:
+      - app_data:/app/data
     expose: ['3000']
   caddy:
     image: caddy:2-alpine
@@ -18,5 +25,6 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 volumes:
+  app_data:
   caddy_data:
   caddy_config:

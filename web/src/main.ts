@@ -4,6 +4,8 @@ import type { CheckRecord, ProbeResult } from './connectivity';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
 const lock = '<svg viewBox="0 0 40 40" fill="none" aria-hidden="true"><rect x="10" y="17" width="20" height="17" rx="4"/><path d="M14 17v-5a6 6 0 0 1 12 0v5M20 24v3"/></svg>';
+let disposeRoute: (() => void) | undefined;
+let routeVersion = 0;
 
 function renderGate(unavailable: boolean) {
   root.innerHTML = `
@@ -136,11 +138,26 @@ function renderCheck() {
   updateRecords();
 }
 
-function route() {
-  // 令牌只留在 URL 片段中。M1 门禁上线前，所有邀请均按不可用处理。
-  if (location.hash === '#/check') renderCheck();
-  else renderGate(Boolean(location.hash && location.hash !== '#/' && location.hash !== '#'));
+async function route() {
+  disposeRoute?.();
+  disposeRoute = undefined;
+  const version = ++routeVersion;
+  const hash = location.hash;
+  try {
+  if (hash === '#/check') renderCheck();
+  else if (hash === '#/admin' || hash.startsWith('#/admin/')) {
+    renderGate(false);
+    const { renderAdmin } = await import('./admin');
+    if (version === routeVersion) disposeRoute = renderAdmin(root);
+  } else if (hash.startsWith('#/i/')) {
+    renderGate(false);
+    const { renderInvitation } = await import('./invitation');
+    if (version === routeVersion) disposeRoute = renderInvitation(root, hash.slice(4));
+  } else renderGate(Boolean(hash && hash !== '#/' && hash !== '#'));
+  } catch {
+    if (version === routeVersion) renderGate(true);
+  }
 }
 
-window.addEventListener('hashchange', route);
-route();
+window.addEventListener('hashchange', () => { void route(); });
+void route();

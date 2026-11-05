@@ -1,250 +1,139 @@
-# 受邀预约 · M0
+# 受邀预约 · M1
 
-邀请制预约站的最小可运行版本。主站已部署到 `https://book-my-time-patrick.cn/`，前端由 Cloudflare 静态资源托管，同源 `/api` 由 Workers 提供。GitHub Pages 保留为备用入口，普通 Node 服务器保留为另一种同域部署方式。
+私密邀请制预约站。主站为 [book-my-time-patrick.cn](https://book-my-time-patrick.cn/)，前端由 Cloudflare 静态资源托管，同源 `/api` 由 Workers 提供。GitHub 保存源码并发布备用 Pages；Node + SQLite 保留为同域服务器备选。
 
-## 当前进度
+M1 已发布后台通行密钥 + TOTP 登录、登录设备和凭据管理、邀请链接管理、受邀门禁与一小时预览。19 项测试、本机 workerd/D1 的 25 项检查及隔离云端 27 项检查通过。正式主站权限与静态产物检查已通过，Cloudflare 自动改写抓取规则的开关仍待用户关闭，**正式管理员等待本人首次绑定，真实设备验收尚未完成**。邮箱、周历、真实预约和日历同步在后续里程碑开放。
 
-| 项目 | 当前状态 |
+## 当前状态
+
+| 项目 | 状态 |
 | --- | --- |
-| 根路径中性占位、通用预览、搜索屏蔽 | 已实现 |
-| 独立 API、精确跨域允许、默认关闭业务接口 | 已实现 |
-| 连通性自检、浏览器内记录、CSV 导出 | 已实现 |
-| 同一套 API 在 Workers 与 Node 中运行 | 已实现 |
-| GitHub Pages 工作流、Workers 配置生成、同域 Docker 配置 | 已提供；Cloudflare 主站静态资源已部署并通过技术上线检查 |
-| 登录可行性 | Argon2id 的两种实现线上反复触发 1102。通行密钥验签、TOTP、组合核心验证各 12/12 通过，完整登录流程待 M1 |
-| GitHub 仓库、Pages 与 Cloudflare 授权 | 已完成，GitHub 源码与 Actions 发布保留，Pages 用作备用 |
-| 主站与 API 自有域名 | `book-my-time-patrick.cn` 已在阿里云注册，DNS 已交给 Cloudflare；主站与同源 API 已上线，旧 API 子域名保留兼容 |
-| 正式 API 与前端联调 | 新主站 15 项 HTTP 检查通过，旧 API 与 Pages 备用入口兼容检查通过 |
-| 大陆三网访问 | 收到部分网络可打开、部分网络失败反馈，双项结果及覆盖待补；旧 Pages 的测试结果不能替代新域名验收，具体网络记录仅保存在本机 |
-| 登录与有效邀请 | M1 实现，当前尚未开放 |
-| 邮箱与申请邮件 | M2 实现 |
-| iCloud / Outlook 忙闲读取 | M3 实现，独立只读授权途径待核实 |
+| 中性首页、通用链接预览、禁止索引 | 已实现，M0 已上线 |
+| `.cn` 主站、同源 API、静态资源直出 | 已部署并通过 M0 技术上线检查 |
+| 大陆网络可达性 | 收到部分可打开和部分失败反馈；Wi-Fi 覆盖、双项结果与移动端验收待补 |
+| 后台通行密钥 + TOTP、记住登录 | 已发布，完整合成云端流程通过；本人设备验收待补 |
+| 首次初始化、登录设备与通行密钥管理 | M1 已实现；正式管理员尚未初始化 |
+| 邀请创建、延期、撤销、复制为新链接 | 已发布，隔离云端流程通过 |
+| 受邀者门禁、一小时预览、权限裁剪 | M1 已实现；仅展示准备中的模块，不开放真实预约 |
+| 邮箱与申请邮件 | M2 |
+| iCloud / Outlook 忙闲读取、直接预约 | M3 |
+| 开放局与名额管理 | M4 |
+| 完整个人展示与规则等后台配置 | 后续里程碑 |
 
-M0 所有邀请入口显示统一不可用页。根路径不会请求个人资料或日历。公开的 `#/check` 页面只测试固定连通性信号，不展示个人内容。API 健康检查通过仅说明 API 可用，不代表日历已经同步。
+主入口始终只显示「仅限受邀访问」。个人内容必须先由 API 校验邀请令牌，不能通过首页或静态文件取得。API 健康检查通过不代表管理员已初始化、日历已同步或预约已开放。
 
-主分享入口为 [受邀预约](https://book-my-time-patrick.cn/)，网络测试使用 [可达性自检](https://book-my-time-patrick.cn/#/check)，均已部署。备用入口为 [GitHub Pages](https://book-my-time-patrick.github.io/)。最新部署与验证结果见 [M0 线上验证记录](docs/M0-线上验证记录.md)。M0 尚未完成全部验收，也尚未提供完整预约或管理后台。
+- 主站：[受邀预约](https://book-my-time-patrick.cn/)
+- 管理后台：[后台入口](https://book-my-time-patrick.cn/#/admin)，首次使用需本人完成下述绑定。
+- 网络检查：[可达性自检](https://book-my-time-patrick.cn/#/check)
+- 详细操作：[M1 使用与验证](docs/M1-使用与验证.md)
+- 历史记录：[M0 线上验证](docs/M0-线上验证记录.md)、[M0 本机验证](docs/M0-验证记录.md)
 
-## 本机演示
+## 第一次进入后台
 
-需要 Node.js 22.12 以上版本和 npm。在项目目录打开终端，复制运行。
+后台网址本身不授予注册权限。第一次设置需要从本机 `.local/m1-首次初始化.txt` 单独复制初始化码，输入后台的初始化表单。它是随机生成的 24 小时一次性授权码，不是以后要记住的密码，也不放在普通后台网址中。
+
+1. 打开主站的 `#/admin`，输入单独提供的初始化码。
+2. 在自己的身份验证器中选择手动添加，填入页面显示的设置密钥；使用基于时间的六位动态码。
+3. 输入当前动态码，按系统提示保存通行密钥，并完成 Face ID、Touch ID、Windows Hello 或系统提供的验证。
+4. 成功后进入后台。建议在另一台常用设备上再添加一把通行密钥。
+
+第一次绑定必须由本人在浏览器中完成，工具不会代建正式管理员。每次绑定流程需要在五分钟内完成；超时重新开始时，使用页面新生成的验证器密钥。设置完成后，该数据库的首次初始化入口永久关闭，旧初始化码失效。
+
+以后登录无需账号和记忆密码，使用通行密钥与验证器动态码。勾选「记住这台设备」最长 30 天；未勾选为 12 小时。有效会话内日常打开后台只检查会话，减少重复交互与计算。退出、撤销、到期或清理浏览器数据后需要重新验证。完整设备行为仍须实机验收。
+
+## 本机开发
+
+需要 Node.js 22.12 以上版本和 npm。在项目目录运行：
 
 ```bash
 npm ci
+npm run prepare:local
 npm run dev
 ```
 
-打开以下地址。
+打开 `http://127.0.0.1:5173/#/admin`，使用 `.local/m1-local-首次初始化.txt` 中的本机初始化码。本机数据与正式 D1 数据相互独立，不能拿本机测试结果代替真实手机或 Windows 认证器验收。
 
-- 首页 `http://127.0.0.1:5173/`，应只看到「仅限受邀访问」。
-- 连通性测试 `http://127.0.0.1:5173/#/check`，选择网络后点击「开始检测」。
-- 统一不可用页 `http://127.0.0.1:5173/#/i/example-unavailable`。
-- API `http://127.0.0.1:8787/api/health`，只返回固定 JSON。
+首页为 `http://127.0.0.1:5173/`，网络自检为 `http://127.0.0.1:5173/#/check`。无效邀请如 `#/i/example-unavailable` 显示统一不可用页。开发时保持 `127.0.0.1` 和既定端口，避免与 `localhost` 混用导致源和通行密钥 RP 不一致。Ctrl+C 结束开发服务。
 
-日常开发使用 `127.0.0.1`，不要把前端改成 `localhost` 后又保留原跨域配置。Ctrl+C 结束开发服务。
+`prepare:local` 创建本机 D1 表结构，将服务端密钥写入忽略提交的 `.dev.vars` 和 `.local/node-secrets.env`。文件为 `0600`，仅当前系统用户可读写。重复准备保留加密密钥；尚未创建管理员且初始化码过期时可重发：
 
-前端全部字体、脚本、图标随站点提供。没有第三方字体、埋点、验证码或公共资源 CDN。运行时仅请求当前前端和配置好的 API。
+```bash
+npm run prepare:local -- --refresh-setup
+```
 
-## Cloudflare 主站部署
+重发初始化码不能重置已经创建的管理员。初始化码、验证器设置密钥、通行密钥、会话令牌和日历订阅链接都不能提交到 Git 或填入公开构建变量。
 
-Cloudflare 直接托管主站 HTML、脚本、样式和图标，访客打开主站时从 Cloudflare 获取这些资源。静态资源命中由资源服务直接返回，只有 `/api` 和 `/api/*` 路径优先执行 Worker，减少静态页面访问的 Worker CPU 消耗。邀请令牌放在 URL 的 `#` 后，M1 将由 API 校验邀请再返回个人数据。当前所有业务接口统一返回 404。
+## Cloudflare 正式部署
 
-### 1. 准备账号和域名
+主站使用 `book-my-time-patrick.cn`，API 基址为同源 `/api`。原 `api.book-my-time-patrick.cn` 保留为备用 Pages 的 API。**管理后台只使用 `.cn` 主站入口**，后台会话与通行密钥绑定该站点，不通过旧 API 子域名登录。
 
-需要一个你可管理的 GitHub 仓库、Cloudflare 账号，以及一个 DNS 已交给 Cloudflare 管理的自有域名。本项目按用户选择暂不备案，先使用 `.cn` 域名与 Cloudflare 实测大陆可达性。
+静态资源命中时由 Cloudflare 直接响应；仅 `/api` 与 `/api/*` 优先执行 Worker。所有字体、脚本和图标随站点提供，没有外部字体、公共脚本 CDN、埋点或外部二维码服务。
 
-站点仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，组织与仓库均已创建。主分享入口为 `https://book-my-time-patrick.cn/`，邀请与检查的 hash 路由接在该地址后。GitHub 继续保管源码，原 Actions 工作流继续发布备用 Pages 入口 `https://book-my-time-patrick.github.io/`。
+### 准备与发布
 
-自有域名 `book-my-time-patrick.cn` 已在阿里云注册，权威 DNS 已交给 Cloudflare，域名状态为 Active。主站调用 `https://book-my-time-patrick.cn/api`，旧地址 `https://api.book-my-time-patrick.cn/api` 保留供 Pages 和已有链接兼容。配置中的额外 CORS 前端源仍填 `https://book-my-time-patrick.github.io`，主站通过同源访问 API。
-
-GitHub 免费计划下通常使用公开代码仓库。发布前确认仓库中只有代码，`.env`、凭据、实际邀请和日历文件均不能提交。GitHub Pages 仓库是否私有与网站的邀请门禁是两件事。
-
-年度预算上限为 120 元。本次迁移沿用 Cloudflare 免费套餐，没有升级收费方案。Workers、D1 和外部发信通道的免费额度需要分别核验。域名按续费价计算，不按首年促销价推算。免费套餐额度耗尽时应停止服务并提示，不能把失败结果当作空闲。
-
-全球免费版不保证大陆各网络稳定。Cloudflare 官方说明，境外服务器访问大陆存在延迟与可靠性问题；[Cloudflare China Network](https://developers.cloudflare.com/china-network/) 属于 Enterprise 的单独订阅，并要求有效 ICP 备案或许可。本项目当前未使用该产品，实际可达性以新域名的持续网络测试为准。
-
-### 2. 官方登录
-
-本项目已在当前电脑完成 Cloudflare 官方登录。更换电脑或需要重新授权时运行下列命令，授权页面由 Cloudflare 打开，凭据由工具保管。
+当前电脑已完成官方登录。更换电脑时可运行：
 
 ```bash
 npx wrangler login
 npx wrangler whoami
 ```
 
-不要将 API token、订阅链接或邮箱密码粘贴到聊天或源文件中。后续服务端密钥通过 `wrangler secret put` 设置。前端构建变量全部公开，不能用于存密钥。
-
-### 3. 生成并部署主站与 API
-
-三个参数依次为备用 Pages 的允许源、旧 API 子域名和主站地址。都填写协议加域名，不含路径、查询参数或 hash。
+生成包含主站的配置，再准备 D1 和服务端密钥：
 
 ```bash
 npm run configure:worker -- https://book-my-time-patrick.github.io https://api.book-my-time-patrick.cn https://book-my-time-patrick.cn
+npm run prepare:m1
 npm run deploy:site
 ```
 
-配置保存到忽略提交的 `.local/wrangler.production.jsonc`。`deploy:site` 先运行 `build:site`，将强制使用同源 `/api` 的前端构建到独立目录 `.local/site-dist/`，再发布主站资源与 API。该构建模式覆盖本机 `VITE_API_BASE_URL`，不会混入 Pages 的跨域 API 地址。后续主站前端或 API 更新均使用 `npm run deploy:site`。GitHub Actions 推送更新的是备用 Pages，主站还需执行此命令。
+`prepare:m1` 创建或复用 `invited-booking` D1，应用 `migrations/`，绑定 `DB`，准备服务端加密密钥及限时初始化码。当前使用 Cloudflare 免费套餐，不会自动升级付费计划；后续仍需核对数据、请求和发信的实际额度。
 
-默认关闭 `workers.dev` 和预览地址，绑定主站与旧 API 子域名。当前不创建数据库、不接入个人日历。D1 在 M1 需要真实持久化时再配置。
+首次初始化码只写入本机 `.local/m1-首次初始化.txt`，不会打印到终端。服务端密钥备份为 `.local/m1-secrets.json`。代码和部署产物不含真实初始化码或加密密钥。具体操作与恢复边界见 [M1 指南](docs/M1-使用与验证.md)。
 
-配置命令只传两个参数时，会重新生成原来的 API-only 配置，移除主站域名和静态资源配置。它仅用于有意恢复旧部署方式，日常更新主站时务必保留第三个参数。`npm run deploy:api` 不重新构建主站资源，日常使用上面的 `deploy:site`。
+重复运行会复用现有加密密钥，不覆盖已存在的线上 `DATA_ENCRYPTION_KEY`。若线上已有密钥而本机备份缺失，脚本会停止，先恢复正确备份。不要手动更改、删除或轮换该密钥，否则现有 TOTP 密文可能无法解密。
 
-打开部署后的 `https://book-my-time-patrick.cn/api/health`。成功时应返回以下固定内容，旧 API 子域名也应返回同样的固定信号。
-
-```json
-{"ok":true,"service":"invite-api"}
-```
-
-API 与前端资源均设置禁止索引。部署配置显式设置 `observability.enabled=false`，管理 API 本次未返回该字段；已确认 Logpush 关闭，业务代码没有请求记录器。域名服务商和托管平台可能保留各自的基础设施日志，本站应用不写 IP 明细、Authorization 或邀请令牌日志。
-
-### 4. 更新备用 GitHub Pages
-
-1. 将代码提交到 GitHub 仓库的 `main` 分支。
-2. 进入仓库 Settings → Pages，将 Source 选为 GitHub Actions。
-3. API 部署后，进入 Settings → Secrets and variables → Actions → Variables，新增 `VITE_API_BASE_URL`，值为 `https://api.book-my-time-patrick.cn/api`。这是公开配置。
-4. 在 Actions 中手动运行「验证并部署 GitHub Pages」，或推送到 `main` 触发。
-5. 使用工作流输出的 Pages 地址打开首页，再打开同一地址后的 `#/check`。
-
-前端使用相对资源路径，支持用户站根路径和项目站的 `/仓库名/` 路径。无需配置服务器路由或 `404.html`。链接预览的 HTML 标题统一为「受邀预约」，没有姓名、头像或简介。`robots.txt` 禁止抓取，不生成 sitemap。
-
-没有设置该仓库变量时，工作流发布中性入口与自检页，自检中的 API 显示「待配置」且不发送 API 请求；这时只可测试前端，不能算完成 M0。设置非空值后会先检查地址格式，格式无效则阻止发布。API 域名必须使用 HTTPS。不要填 `workers.dev`、`localhost`、邀请链接或任何账号密码。
-
-Pages 使用 `npm run build:pages` 构建；普通 `npm run build` 仍保留 `/api` 同源默认值，供下文的香港服务器备用方案使用。新建组织站仓库后应先把 Pages 发布源设为 GitHub Actions，避免 GitHub 默认将仓库说明文档生成网站。
-
-GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件或 `.local/`。Cloudflare 主站使用独立的 `.local/site-dist/`，两个产物互不覆盖。M1 管理后台与登录会话计划使用 `book-my-time-patrick.cn` 下的同源 API。当前尚未创建真实管理员凭据或会话，本次入口迁移没有已有凭据需要迁移。
-
-## 可达性自检
-
-请在大陆实际网络上操作，香港网络或本机 localhost 结果不计入大陆验收。
-
-1. 暂停设备的代理或 VPN，打开主站 `https://book-my-time-patrick.cn/`。
-2. 打开 `#/check`，手动选择运营商和网络，点击检测。
-3. 前端检测会重新获取 `connectivity.json`，API 检测会请求 `/api/health`，均禁用 HTTP 缓存，最长等待 8 秒。
-4. 分别覆盖电信、联通、移动的 4G/5G 和 Wi-Fi，共六种组合。无法覆盖的项目保留为未测，不推断通过。
-5. 页面可保存当前浏览器最近 40 条记录。点击「下载测试记录」，汇总不同设备结果。清空只影响当前浏览器。
-
-请在测试前准确选择网络。页面不会自动确认代理是否关闭，也不会自动识别运营商。所有结果只保存在本机浏览器，不上传测试记录。每条记录包含北京时间、运营商、网络类型和前端/API 的结果及耗时。没有 IP、位置、User-Agent 明细或邀请令牌。
-
-只有前端和 API 都通过，才算该次网络测试通过。首页能打开但 API 失败时，预约功能仍不可用。新主站的测试需重新执行并记录访问域名，原 Pages 入口的用户反馈仅作为历史记录，不能计入新主站的验收。
-
-## 登录可行性探针
-
-原定方案为 Argon2id + TOTP。Workers 免费版的 HTTP CPU 标称限制是 10 ms。先验证安全参数的计算成本，不通过降低密码保护参数来适配额度。
+未初始化且码过期时：
 
 ```bash
-npm run probe:auth
+npm run prepare:m1 -- --refresh-setup
+npm run deploy:site
 ```
 
-脚本使用公开的虚构输入，按 Argon2id、19 MiB 内存、2 次迭代、并行度 1 计算五次，记录 Node 进程 CPU 耗时。本机完整结果保存到 `.local/auth-probe.json`，不提交到 Git。
+重发只对尚未创建管理员的数据库有效，不会重新开放已有管理员的初始化入口。
 
-还可以验证相同计算在本地 Workers 运行时能否执行。
+### 日常更新
 
 ```bash
-npm run probe:worker
+npm run deploy:site
 ```
 
-在另一个终端运行。
+它先检查并构建主站到 `.local/site-dist/`，强制同源 `/api`，再发布静态资源和 Worker。推送 GitHub 更新的是备用 Pages，主站仍需执行此命令。新增数据库迁移时，发布前还需运行 `npm run prepare:m1` 应用迁移。
 
-```bash
-curl -X POST http://127.0.0.1:8788/probe
-```
+生成配置时保留第三个主站参数。两参数方式会恢复原 API-only 配置并移除主站资源与域名配置，不用于日常主站更新。配置脚本会保留已有 `DB` 绑定；配置文件损坏时会中止，避免静默丢失绑定。
 
-这个探针仅在本机 `127.0.0.1` 下启用，不接收真实密码，也不包含在正常 API 中。响应的 `cloudCpuVerified` 固定为 `false`。**本机 Node CPU 与本地 workerd 成功均不能替代 Cloudflare 线上 CPU 计量**。JavaScript 实现的结果也不能代表其他优化实现。
+生产默认关闭 `workers.dev`、预览地址和请求观测日志；应用没有请求内容日志。所有 API 响应禁止缓存和索引，静态页使用通用元数据、`robots.txt` 与安全响应头。平台自身基础设施日志与应用记录是两回事。
 
-2026 年 11 月 5 日的真实部署中，JavaScript 与静态 WASM 实现分别有 5/12 和 6/12 次触发 Cloudflare CPU 超限（1102）。用户已选择保留每年 120 元预算，将后台登录改为通行密钥 + TOTP。
+### 备用 GitHub Pages
 
-新的轻量探针对 TOTP、P-256 验签和两者组合各执行 12 次，36 次全部通过。它只验证密码学核心，不包含完整 WebAuthn 数据校验、数据库、会话或真实浏览器认证器。精确的云端 CPU 毫秒数没有读到，不能把 HTTP 耗时当作 CPU 计量。
+仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，Pages Source 使用 GitHub Actions。公开仓库变量 `VITE_API_BASE_URL` 为 `https://api.book-my-time-patrick.cn/api`。推送 `main` 后，工作流只发布 `dist/`；需求、`.local/`、数据库和凭据不会上传。
 
-需要复验时使用下列命令。线上命令会在当前账号部署带随机访问密钥和 20 分钟失效时间的探针，固定次数调用后删除该 Worker，使用虚构输入。运行前应先确认账号已启用免费 Workers 服务。
+Pages 使用 `npm run build:pages`，主站使用独立的 `build:site`。缺少公开 API 变量时，Pages 自检显示「待配置」且不发送 API 请求；格式错误则阻止构建。普通 `npm run build` 保留 `/api` 同源默认值，供 Node 备选使用。
 
-```bash
-npm run probe:cloud:preflight
-npm run probe:cloud -- --lightweight --local
-npm run probe:cloud -- --lightweight
-```
+## 登录设备、通行密钥和邀请
 
-完整结果保存在 `.local/cloud-lightweight-probe.json`。原定密码方案的复验命令为 `npm run probe:cloud`，结果保存在 `.local/cloud-auth-probe.json`。探针不与正常 API 一起部署，真实网站 API 仍要求自有域名。中断运行后应检查本机记录中的 Worker 名称，并确认本次临时资源已清理。
+后台分为「邀请链接」「登录设备」「通行密钥」。登录设备是一个浏览器会话；同一台电脑的不同浏览器可有不同会话。列表显示昵称、粗粒度系统和浏览器、首次登录、最近使用、有效期与当前设备标记，不记录 IP 明细或硬件指纹。
 
-## 后台登录与多设备体验
+可以重命名、移除某个登录，以及退出其他全部登录。通行密钥另行管理，支持添加、命名、撤销。撤销密钥会使它关联的会话失效；至少保留一把有效通行密钥。移除会话不会删除其他设备可能共用的通行密钥。新增或撤销凭据等敏感操作需要最近十分钟内完成双重验证；过期后按页面提示重新验证。
 
-M1 计划让后台支持 iPhone、Mac、Windows 10 和 Windows 11，使用同一个管理员账号。各设备可以分别注册通行密钥，后台可查看并撤销某一设备的登录。当前只有密码学核心可行性验证，完整登录与真实设备测试尚待实现。移动端与桌面端的日历来源、邮箱、预约、邀请、规则与展示管理按后续里程碑交付。
+验证码不能重放。同一组三十秒动态码已经完成一次验证后，再次登录或重新验证要等待下一组。日常有效会话不要求每次重新输入。
 
-- iPhone 可通过 Face ID 或设备解锁方式使用通行密钥。Mac 可使用系统提供的验证方式，也提供附近手机扫码路径。开启同一 Apple 账户的 iCloud 钥匙串后，两端可以同步通行密钥。
-- Windows 10/11 可在支持的 Edge、Chrome 中使用 Windows Hello，按设备能力提供 PIN、指纹或人脸。优先允许每台常用电脑保存自己的通行密钥。
-- 手机扫码路径需要两端联网、开启蓝牙且系统/浏览器支持。Windows 10 和 11 的具体界面不同，M1 必须实机验证，不能以 Windows 11 的界面代替 Windows 10 验收。
-- 拟定为首次或会话到期时验证，提供「记住这台设备」，建议最长 30 天、后台可撤销。日常页面请求只校验会话，减少重复交互与计算。会话到期、退出、撤销或浏览器清理数据后需重新验证。
-- 保留 TOTP。动态口令单独作为登录方式会改变认证强度，是否启用备用登录须明确配置。新增凭据、修改日历授权等敏感操作应重新验证。
+邀请生成 256 位随机令牌，放在 URL 的 hash 中，服务端只存哈希。原始链接仅在生成时返回，留在当前页面内存中供复制；刷新或离开后无法从数据库还原。请生成后及时保存。列表的「复制为新链接」会产生另一条独立邀请，不是找回旧令牌。
 
-M1 包含「登录设备」管理页。列表按浏览器登录会话展示设备昵称、系统、浏览器、首次登录、最近使用、有效期与当前设备标记，支持改昵称、移除指定登录和退出其他所有登录。它使用浏览器的系统信息生成粗粒度标签，不记录 IP 明细或做硬件指纹识别。同一台电脑的不同浏览器会作为不同登录显示。
+邀请可以设置有效期、可见模块及预约方式，并延期或撤销。服务端在后续请求中立即执行新有效期和撤销状态。无效、过期或撤销都显示相同的不可用页。M1 有效邀请仅展示已授权模块的准备状态；勾选预约方式不会提前开放 M2 之后的功能。
 
-撤销会话后，服务端立即拒绝该会话的后续请求。客户端收到失效响应后清理当前页面数据并回到登录入口。通行密钥在另一列表中管理，支持添加、命名和撤销。移除一个登录会话不会自动撤销其他设备共用的通行密钥；撤销已通过 iCloud 同步的通行密钥会使其所有副本在本站失效。凭据变更需要重新验证，避免误删后没有可用登录方式。
+「以受邀者视角预览」生成一小时临时邀请，显示醒目预览提示，不计访问、不创建预约、不发邮件。
 
-设备和浏览器行为依据 [Microsoft Windows 通行密钥文档](https://learn.microsoft.com/en-us/windows/security/identity-protection/passkeys/) 与 [Apple 通行密钥说明](https://support.apple.com/en-us/102195)。
-
-官方资料可用于复核额度与参数。
-
-- [Workers 资源限制](https://developers.cloudflare.com/workers/platform/limits/)
-- [OWASP 密码存储建议](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
-- [本次探针使用的哈希库](https://github.com/paulmillr/noble-hashes)
-
-## 日历接入预检
-
-私人来源是 iCloud 中勾选的个人日历，工作 Outlook 当前通过订阅在 Apple 日历可见。两者均参与忙闲计算。多设备同步成功与允许本站读取忙闲需要分别验证。
-
-这些检查用于提前确认 M3 接入方案，可使用虚构日程。M0 的当前验收范围是项目骨架、Cloudflare 主站与同源 API 联通、中性入口、可达性自检，以及 Pages 和同域服务器备用部署能力；真实日历读取在 M3 验收，邮箱管理与申请邮件在 M2 验收。
-
-- 核实单位账户是 M365 国际版、世纪互联还是本地 Exchange，并在组织允许的范围内进行独立只读授权。
-- 验证 iCloud 能否只返回必要的忙闲字段。不要默认拉取完整事件后再删除标题。
-- 验证新增、改期、取消，以及全天事件分别标为空闲和忙碌时的结果。
-- 记录 Outlook → Apple 订阅的真实刷新延迟。Mac 刚上传数据不等于订阅上游已刷新。
-- 服务器只保留开始、结束、全天和必要忙闲状态，不存事件标题、参与人、地点、正文或完整 ICS。
-- 任何必要来源失效、过期或状态未知时，暂停自动确认，工作日保留邮件申请。周末仅接受已发布开放局的申请。
-
-优先让云端直接读取合规的最小字段。只有必须依赖本机的来源才使用 Mac 转送。Mac 经常出差携带，不能假定它全天在线。正式同步和预约计算在 M3 完成。
-
-## 已确认的预约规则
-
-这些是后续里程碑的实现基线，M0 没有可用预约入口。
-
-- 周一至周五普通可约窗口为基准时区 09:00–21:00，整段预约必须在窗口内。最远 30 天，起点每 30 分钟一个，时长 30、60、90、120 分钟。
-- 当天的普通预约需要邮件确认，申请本身不占位。之后日期的合规空闲时段可直接预约。当天按 Asia/Shanghai 日期判断，这个边界来自本次方案建议。
-- 工作日的已忙时段也可以提交申请。审批时重新核对冲突，不能覆盖另一份站内已确认预约。
-- 周六、周日只通过模式二。普通申请不能绕过周末限制。
-- 六种活动模板为 coffee chat、lunch、dinner、bar talk、airport chat、video call，均默认一小时，创建时可调。默认名额 1、姓名必填、直接确认，每场可调整。
-- 主动开放的活动可以临时发布，不受统一的 24 小时提前量限制。地点仅展示城市，具体城市、日程与可见权限由后台设置。
-- 收件邮箱和发信凭据在后续后台填写，不作为前端常量或样例数据提交。
-
-## 方案 2 · 切换到同域服务器
-
-同一套 API 的入口在 `server/app.ts`，Workers 和普通 Node 分别使用薄入口适配。M0 没有持久化业务数据，当前切换不涉及数据迁移。后续引入 D1 时需增加 SQLite 适配和备份恢复验证，不能把 D1 绑定直接带到 Node。
-
-先在本机验证同域版本。
-
-```bash
-npm run build
-npm start
-```
-
-打开 `http://127.0.0.1:3000/#/check`。前端构建默认使用 `/api`。若此前在本机 `.env` 设置了独立 API，请将 `VITE_API_BASE_URL` 改回 `/api` 后重新构建。
-
-部署到香港服务器时先安装 Docker 和 Compose，将域名 A/AAAA 记录指向服务器，开放 80、443 端口，然后复制运行。
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 中的 `SITE_DOMAIN` 为备用部署的真实域名，例如 `booking.book-my-time-patrick.cn`，不带协议。该子域名需另行解析到香港服务器。然后运行。
-
-```bash
-docker compose config
-docker compose up -d --build
-docker compose logs --tail=50
-```
-
-Caddy 自动申请 HTTPS 证书。若使用上述示例域名，通过 `https://booking.book-my-time-patrick.cn/#/check` 验证。该方案前端和 API 同域，保留同一套邀请入口格式。Caddy 配置没有开启访问日志。证书卷需要在迁移服务器时保留。M0 无个人业务数据库，数据库自动备份将在持久化里程碑中加入。
-
-本机已验证 Node 同域入口。Docker/Caddy 配置尚待实际运行验证，备用香港服务器的正式部署属于可选项。
-
-## 检查命令与排错
+## 验证与可达性
 
 ```bash
 npm run check
@@ -253,19 +142,66 @@ npm run build
 npm run dry-run:api
 ```
 
-API 检查覆盖固定公开信号、缓存/索引头、精确 CORS、预检请求、未配置源时的拒绝，以及所有业务接口关闭。
+本轮自动化和正式发布结果待主流程核对后补入 [M1 使用与验证](docs/M1-使用与验证.md)。浏览器自动化目前不可用，iPhone、Mac、Windows 10、Windows 11 的系统提示、保存凭据、扫码方式和手机布局均待真实设备验证。源码中存在完整验证逻辑不等于已完成这些设备验收。
+
+隔离云端探针命令：
+
+```bash
+npm run probe:m1
+```
+
+它创建独立的临时 Worker 和 D1，使用合成认证器与虚构管理员走完整流程，结束后删除临时资源，不创建正式管理员。结果保存于忽略提交的 `.local/m1-cloud-probe.json`。它可以验证服务器运行兼容性，不能替代真人设备，也不能把 HTTP 往返耗时当成云端 CPU 毫秒数。探针中断后核对结果中的清理状态。
+
+大陆网络验收继续使用主站 `#/check`。关闭代理/VPN，手动选择真实运营商与接入方式，覆盖三家运营商的移动网络与 Wi-Fi。只有「页面资源」和「预约 API」都通过才计入该组合；未测组合保留待测。手机热点按上游移动网络分类。具体网络反馈只保存在本机，不进入公开仓库。
+
+全球 Cloudflare 免费网络不保证大陆各网络稳定。[Cloudflare China Network](https://developers.cloudflare.com/china-network/) 是需单独订阅并满足相应条件的产品，本项目未启用。当前按已确认选择暂不备案，先对 `.cn` 主站实测；更换域名后不能沿用旧 Pages 测试为新站通过结论。
+
+## Node + SQLite 备选
+
+`server/app.ts` 复用同一套 API，Node 薄入口使用 SQLite；Workers 使用 D1。SQLite 数据库必须持久化，服务端加密密钥也必须长期保留。正式切换不能只复制前端，需导出并恢复对应业务数据库和正确密钥，再验证登录与邀请。
+
+本机 HTTP 同域预览：
+
+```bash
+npm run prepare:local
+cp .env.example .env
+npm run build
+node --env-file=.env --env-file=.local/node-secrets.env build/server.js
+```
+
+打开 `http://127.0.0.1:3000/#/admin`，本机初始化码仍从 `.local/m1-local-首次初始化.txt` 单独输入。Node 默认数据库为 `.local/app.sqlite`，与 Wrangler 本机 D1 独立。上述命令让第二份环境文件提供密钥，避免 `.env.example` 的空占位值覆盖它们。不要将真实密钥写回 `.env.example`。
+
+Docker/Caddy 备选保留在 `compose.yaml`、`Dockerfile` 和 `deploy/Caddyfile`，使用数据库卷与证书卷。HTTPS 反向代理需显式启用 `TRUST_PROXY=1`；Node 仅在原 Host 与配置站点完全匹配且代理协议为 HTTPS 时恢复协议，不读取任意转发主机名。Compose 已启用此选项并只在内部暴露应用端口，普通环境默认关闭。实际 Docker、反向代理 HTTPS 登录和香港服务器恢复尚未验收，不视为可直接替代主站的已验证生产方案。数据库备份恢复也需在正式迁移前单独验证。
+
+## 后续预约与日历基线
+
+- 普通预约周一至周五，09:00–21:00，最远 30 天，起点每 30 分钟，时长 30/60/90/120 分钟。
+- 当天普通预约通过邮件确认；申请本身不占位。工作日已忙时间也可申请，审批时不能覆盖站内已确认预约。
+- 周末仅开放局；开放局可临时发布，不严格受 24 小时提前量限制。
+- coffee chat、lunch、dinner、bar talk、airport chat、video call 默认一小时、名额一人，后台可调整。
+- 地点仅城市级别，常驻城市与可见行程由后续后台设置。
+- Outlook 工作来源与 iCloud 个人来源独立只读接入，忙闲取并集。Mac 常随身出差，不能依赖它持续在线。
+- 只保留忙闲区间，不存事件标题、参与人、地点、正文或完整 ICS；来源过期或失效时暂停自动确认。
+- 日历读取在 M3，邮箱配置与申请邮件在 M2；当前未接入真实邮箱或私人日历。
+
+原定 Argon2id 的 JavaScript/WASM 两种实现线上分别有 5/12、6/12 次触发 CPU 超限，因此采用已确认的通行密钥 + TOTP。先前 36 次轻量核心探针全部通过只代表密码学核心，完整 M1 的结果另行记录。
+
+## 排错
 
 | 表现 | 处理方式 |
 | --- | --- |
-| 首页只显示「仅限受邀访问」 | 根路径的预期行为。M0 自检使用 `#/check` |
-| 邀请页提示不可用 | M0 尚未实现有效邀请门禁，所有令牌统一关闭 |
-| 页面通过，API 失败 | 检查 API 是否启动、构建变量是否正确、FRONTEND_ORIGIN 是否与浏览器源完全一致 |
-| API 直接打开能返回，页面检测却失败 | 检查 CORS 源、HTTPS 混合内容和静态页面的 CSP 配置 |
-| Workers 提示未登录 | 在自己电脑运行 `npx wrangler login`，再运行 `npx wrangler whoami` |
-| Worker 域名绑定失败 | 确认域名在当前 Cloudflare 账号且 DNS 区域已经生效，API 域名没有冲突记录 |
-| 项目站资源 404 | 确认工作流上传的是 `dist/`，保留 Vite 的相对 base 配置 |
-| Node/Vite 报版本不支持 | 使用 Node.js 22.12 以上版本，重新 `npm ci` |
-| 检测记录刷新后丢失 | 检查隐私浏览或存储权限，下载 CSV 保存。不同浏览器不会共享记录 |
-| HTTPS 证书申请失败 | 检查 DNS 是否指向服务器和 80/443 是否开放，查看 Caddy 日志 |
+| 首页只显示「仅限受邀访问」 | 预期行为；后台用 `#/admin`，自检用 `#/check` |
+| 后台尚未初始化 | 从单独提供的本机文件读取初始化码，不是任何访问者都能注册 |
+| 初始化码无效或过期 | 检查是否使用正式/本机对应文件；尚未创建管理员时可重发 |
+| 管理服务暂不可用 | 核对 D1 绑定、迁移、SITE_ORIGIN 与服务端密钥；不能视为允许初始化 |
+| 登录失败但码看起来正确 | 使用下一组六位动态码，重开认证流程；已用动态码和挑战不能重放 |
+| 提示再次验证 | 敏感操作需近期身份确认，完成通行密钥 + 新动态码后重试 |
+| 系统未能使用通行密钥 | 使用主站 HTTPS 与受支持浏览器；具体设备能力需实机核对 |
+| 邀请页显示不可用 | 检查有效期、撤销状态及是否完整保存 hash 链接，不区分失效原因给访客 |
+| 旧邀请复制按钮不可用 | 原始令牌不在数据库，使用「复制为新链接」或之前安全保存的原链接 |
+| 页面可开但 API 检测失败 | 核对网络、API 地址、CORS 和 CSP；主站应调用同源 `/api` |
+| Workers 提示未登录 | 运行官方 `npx wrangler login` 与 `npx wrangler whoami` |
+| Node/Vite 版本不支持 | 使用 Node.js 22.12 以上版本，重新 `npm ci` |
+| 本机记录刷新后丢失 | 核对隐私浏览和存储权限，及时导出 CSV |
 
-`npm run dry-run:api` 只生成 Worker 构建，不等于已经线上部署。Docker 配置是否在实际服务器可用，需要部署后单独验收。
+初始化码、TOTP 密钥或所有通行密钥丢失时，本版没有网页自助找回流程。保留仍有效的登录和正确密钥备份，再由维护者评估恢复；不要通过删除数据库或轮换加密密钥尝试解锁。

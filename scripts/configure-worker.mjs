@@ -1,6 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
-const [frontendInput, apiInput, siteInput] = process.argv.slice(2);
+const [frontendInput, apiInput, siteInput, databaseInput] = process.argv.slice(2);
 
 function origin(input, label) {
   const url = new URL(input);
@@ -14,6 +14,11 @@ try {
   const frontend = origin(frontendInput, '前端地址');
   const api = origin(apiInput, 'API 地址');
   const site = siteInput === undefined ? null : origin(siteInput, '站点地址');
+  let existingDatabase;
+  try { existingDatabase = JSON.parse(await readFile('.local/wrangler.production.jsonc', 'utf8')).d1_databases?.find((binding) => binding.binding === 'DB'); }
+  catch (error) { if (error.code !== 'ENOENT') throw new Error('现有生产配置无法读取，已停止以免丢失数据库绑定；请先恢复配置'); }
+  const databaseId = databaseInput || existingDatabase?.database_id;
+  if (databaseId && !/^[a-f0-9-]{36}$/i.test(databaseId)) throw new Error('D1 数据库 ID 格式无效');
   if ([api, site].some((url) => url && /(^|\.)(workers\.dev|github\.io)$/.test(url.hostname))) {
     throw new Error('API 和站点需要使用你可管理的自有域名');
   }
@@ -29,8 +34,9 @@ try {
     workers_dev: false,
     preview_urls: false,
     observability: { enabled: false },
-    vars: { FRONTEND_ORIGIN: frontend.origin },
+    vars: { FRONTEND_ORIGIN: frontend.origin, SITE_ORIGIN: (site || api).origin },
     routes,
+    ...(databaseId ? { d1_databases: [{ binding: 'DB', database_name: 'invited-booking', database_id: databaseId, migrations_dir: '../migrations' }] } : {}),
     ...(site ? {
       assets: {
         directory: './site-dist',
@@ -47,6 +53,6 @@ try {
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : '配置失败');
-  console.error('用法 npm run configure:worker -- https://你的账号.github.io https://api.你的域名 [https://你的站点域名]');
+  console.error('用法 npm run configure:worker -- https://你的账号.github.io https://api.你的域名 [https://你的站点域名] [D1数据库ID]');
   process.exitCode = 1;
 }
