@@ -28,16 +28,14 @@ jobs:
       - name: 校验线上 API 地址
         if: vars.VITE_API_BASE_URL != ''
         run: node scripts/check-production-url.mjs
-      - run: npm run build
+      - run: npm run build:pages
       - uses: actions/configure-pages@v5
-        if: vars.VITE_API_BASE_URL != ''
       - uses: actions/upload-pages-artifact@v3
-        if: vars.VITE_API_BASE_URL != ''
         with:
           path: dist
   deploy:
     needs: build
-    if: vars.VITE_API_BASE_URL != '' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       pages: write

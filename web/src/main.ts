@@ -1,5 +1,5 @@
 import './styles.css';
-import { carriers, connections, exportRecords, loadRecords, probe, saveRecords } from './connectivity';
+import { carriers, connections, exportRecords, loadRecords, probe, probeLabel, saveRecords } from './connectivity';
 import type { CheckRecord, ProbeResult } from './connectivity';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -41,9 +41,9 @@ function renderCheck() {
         </form>
         <div class="results" aria-live="polite" aria-atomic="true">
           <div class="result"><span class="result-label">页面资源</span><strong id="frontend-result">等待检测</strong></div>
-          <div class="result"><span class="result-label">预约 API</span><strong id="api-result">等待检测</strong></div>
+          <div class="result"><span class="result-label">预约 API</span><strong id="api-result">${__API_BASE_URL__ ? '等待检测' : '待配置'}</strong></div>
         </div>
-        <p class="notice" id="check-message">请选择真实网络。系统不会自动识别运营商。</p>
+        <p class="notice" id="check-message">${__API_BASE_URL__ ? '请选择真实网络。系统不会自动识别运营商。' : 'API 尚未配置，目前只检测页面资源。结果不计入完整连通性验收。'}</p>
       </section>
       <section class="check-card" aria-labelledby="records-title">
         <div class="section-heading"><span class="section-number">02</span><h2 id="records-title">本机测试记录</h2></div>
@@ -83,8 +83,8 @@ function renderCheck() {
       time.dateTime = record.checkedAt;
       time.textContent = new Date(record.checkedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
       const state = document.createElement('span');
-      state.className = record.frontend.ok && record.api.ok ? 'record-state passed' : 'record-state failed';
-      state.textContent = `页面${record.frontend.ok ? '通过' : '失败'} · API ${record.api.ok ? '通过' : '失败'}`;
+      state.className = record.frontend.ok && record.api.ok ? 'record-state passed' : record.frontend.ok && record.api.unconfigured ? 'record-state' : 'record-state failed';
+      state.textContent = `页面${probeLabel(record.frontend)} · API ${probeLabel(record.api)}`;
       row.append(name, time, state);
       recordsView.append(row);
     }
@@ -92,8 +92,8 @@ function renderCheck() {
 
   function setResult(id: string, result: ProbeResult) {
     const element = document.querySelector<HTMLElement>(id)!;
-    element.textContent = result.ok ? `✓ 连接正常 · ${result.milliseconds} ms` : '× 连接失败';
-    element.className = result.ok ? 'passed' : 'failed';
+    element.textContent = result.unconfigured ? '待配置' : result.ok ? `✓ 连接正常 · ${result.milliseconds} ms` : '× 连接失败';
+    element.className = result.unconfigured ? '' : result.ok ? 'passed' : 'failed';
   }
 
   document.querySelector('#check-form')!.addEventListener('submit', async (event) => {
@@ -105,20 +105,22 @@ function renderCheck() {
     submit.textContent = '正在检测…';
     for (const id of ['#frontend-result', '#api-result']) {
       const result = document.querySelector<HTMLElement>(id)!;
-      result.textContent = '正在连接…';
+      result.textContent = id === '#api-result' && !__API_BASE_URL__ ? '待配置' : '正在连接…';
       result.className = '';
     }
-    message.textContent = '正在分别验证两个服务，请稍候。';
+    message.textContent = __API_BASE_URL__ ? '正在分别验证两个服务，请稍候。' : '正在检测页面资源，API 尚未配置。';
     const [frontend, api] = await Promise.all([
       probe(new URL('./connectivity.json', document.baseURI).href, 'invite-web'),
-      probe(`${__API_BASE_URL__}/health`, 'invite-api'),
+      probe(__API_BASE_URL__ ? `${__API_BASE_URL__}/health` : null, 'invite-api'),
     ]);
     if (!root.contains(submit)) return;
     setResult('#frontend-result', frontend);
     setResult('#api-result', api);
     records = [...records, { checkedAt: new Date().toISOString(), carrier, connection, frontend, api }].slice(-40);
     const saved = saveRecords(records);
-    message.textContent = frontend.ok && api.ok ? '两项均已通过。可以切换下一种网络继续测试。' : '检测未全部通过。请确认设备网络、API 地址和跨域配置，然后重试。';
+    message.textContent = api.unconfigured
+      ? `页面资源${frontend.ok ? '检测通过' : '检测失败，请检查网络'}。API 待配置，本次不计入完整连通性验收。`
+      : frontend.ok && api.ok ? '两项均已通过。可以切换下一种网络继续测试。' : '检测未全部通过。请确认设备网络、API 地址和跨域配置，然后重试。';
     if (!saved) message.textContent += ' 浏览器未允许保存记录，请立即下载本次结果。';
     submit.disabled = false;
     submit.textContent = '再次检测 ↗';

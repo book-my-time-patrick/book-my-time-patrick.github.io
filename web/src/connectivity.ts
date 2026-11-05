@@ -1,4 +1,4 @@
-export type ProbeResult = { ok: boolean; milliseconds: number; message: string };
+export type ProbeResult = { ok: boolean; milliseconds: number; message: string; unconfigured?: true };
 export type CheckRecord = {
   checkedAt: string;
   carrier: string;
@@ -11,7 +11,12 @@ export const carriers = ['电信', '联通', '移动', '其他'] as const;
 export const connections = ['4G / 5G', 'Wi-Fi'] as const;
 const storageKey = 'invited-booking-connectivity-v1';
 
-export async function probe(url: string, service: string): Promise<ProbeResult> {
+export function probeLabel(result: ProbeResult): string {
+  return result.unconfigured ? '待配置' : result.ok ? '通过' : '失败';
+}
+
+export async function probe(url: string | null, service: string): Promise<ProbeResult> {
+  if (url === null) return { ok: false, milliseconds: 0, message: '服务尚未配置', unconfigured: true };
   const started = performance.now();
   try {
     const response = await fetch(url, {
@@ -33,7 +38,7 @@ export async function probe(url: string, service: string): Promise<ProbeResult> 
 function isProbe(value: unknown): value is ProbeResult {
   if (typeof value !== 'object' || value === null) return false;
   const item = value as ProbeResult;
-  return typeof item.ok === 'boolean' && Number.isFinite(item.milliseconds) && item.milliseconds >= 0 && typeof item.message === 'string' && item.message.length < 100;
+  return typeof item.ok === 'boolean' && Number.isFinite(item.milliseconds) && item.milliseconds >= 0 && typeof item.message === 'string' && item.message.length < 100 && (item.unconfigured === undefined || (item.unconfigured === true && !item.ok && item.milliseconds === 0));
 }
 
 export function loadRecords(): CheckRecord[] {
@@ -60,8 +65,8 @@ export function exportRecords(records: CheckRecord[]) {
   const rows = records.map((record) => [
     new Date(record.checkedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }),
     record.carrier, record.connection,
-    record.frontend.ok ? '通过' : '失败', record.frontend.milliseconds,
-    record.api.ok ? '通过' : '失败', record.api.milliseconds,
+    probeLabel(record.frontend), record.frontend.milliseconds,
+    probeLabel(record.api), record.api.milliseconds,
   ]);
   const csv = [headings, ...rows].map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\r\n');
   const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));

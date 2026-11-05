@@ -1,6 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { probe } from '../web/src/connectivity.js';
+import { probe, probeLabel } from '../web/src/connectivity.js';
+
+test('API 未配置时不发送请求，结果明确为待配置且不算通过', async (context) => {
+  const fetchMock = context.mock.method(globalThis, 'fetch');
+  const result = await probe(null, 'invite-api');
+  assert.equal(fetchMock.mock.callCount(), 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.unconfigured, true);
+  assert.equal(probeLabel(result), '待配置');
+});
 
 test('前端占位 HTML、错误服务标识不能冒充 API 连通成功', async (context) => {
   const fetchMock = context.mock.method(globalThis, 'fetch');

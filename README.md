@@ -86,13 +86,15 @@ API 与前端资源均设置禁止索引。Workers 关闭请求观测日志，�
 
 1. 将代码提交到 GitHub 仓库的 `main` 分支。
 2. 进入仓库 Settings → Pages，将 Source 选为 GitHub Actions。
-3. 进入 Settings → Secrets and variables → Actions → Variables，新增 `VITE_API_BASE_URL`，值为 `https://api.your-domain.com/api`。这是公开配置。
+3. API 部署后，进入 Settings → Secrets and variables → Actions → Variables，新增 `VITE_API_BASE_URL`，值为 `https://api.your-domain.com/api`。这是公开配置。
 4. 在 Actions 中手动运行「验证并部署 GitHub Pages」，或推送到 `main` 触发。
 5. 使用工作流输出的 Pages 地址打开首页，再打开同一地址后的 `#/check`。
 
 前端使用相对资源路径，支持用户站根路径和项目站的 `/仓库名/` 路径。无需配置服务器路由或 `404.html`。链接预览的 HTML 标题统一为「受邀预约」，没有姓名、头像或简介。`robots.txt` 禁止抓取，不生成 sitemap。
 
-没有设置该仓库变量时，工作流只执行检查和构建，跳过网站发布。设置非空值后会先检查地址格式，格式无效则阻止发布。API 域名必须使用 HTTPS。不要填 `workers.dev`、`localhost`、邀请链接或任何账号密码。
+没有设置该仓库变量时，工作流发布中性入口与自检页，自检中的 API 显示「待配置」且不发送 API 请求；这时只可测试前端，不能算完成 M0。设置非空值后会先检查地址格式，格式无效则阻止发布。API 域名必须使用 HTTPS。不要填 `workers.dev`、`localhost`、邀请链接或任何账号密码。
+
+Pages 使用 `npm run build:pages` 构建；普通 `npm run build` 仍保留 `/api` 同源默认值，供下文的香港服务器备用方案使用。新建组织站仓库后应先把 Pages 发布源设为 GitHub Actions，避免 GitHub 默认将仓库说明文档生成网站。
 
 GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件或 `.local/`。管理员通行密钥登录界面在 M1 放到 API 域名下，保持登录会话同源。
 

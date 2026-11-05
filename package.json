@@ -13,6 +13,7 @@
     "check": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "build": "npm run check && vite build && npm run build:server",
+    "build:pages": "npm run check && vite build --mode pages",
     "build:server": "esbuild server/node.ts --bundle --platform=node --format=esm --packages=external --outfile=build/server.js",
     "start": "node --env-file-if-exists=.env build/server.js",
     "configure:worker": "node scripts/configure-worker.mjs",
