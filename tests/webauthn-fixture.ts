@@ -2,7 +2,7 @@ import { createHash, createHmac, generateKeyPairSync, randomBytes, sign } from '
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 
 /** Software-only authenticator for protocol tests. It does not model a real device or its UI. */
-type Overrides = { origin?: string; rpID?: string; challenge?: string; userVerified?: boolean; userPresent?: boolean; counter?: number; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string };
+type Overrides = { origin?: string; rpID?: string; challenge?: string; userVerified?: boolean; userPresent?: boolean; counter?: number; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string; backupEligible?: boolean; backedUp?: boolean; transports?: RegistrationResponseJSON['response']['transports'] };
 type CborValue = number | string | Uint8Array | Map<CborValue, CborValue>;
 const bytes = (value: string) => new Uint8Array(Buffer.from(value, 'base64url'));
 const encode = (value: Uint8Array) => Buffer.from(value).toString('base64url');
@@ -41,7 +41,7 @@ export function makeAuthenticator(rpID: string, origin: string) {
     return new TextEncoder().encode(JSON.stringify({ type, challenge: overrides.challenge ?? challenge, origin: overrides.origin ?? origin, crossOrigin: overrides.crossOrigin ?? false, ...(overrides.topOrigin ? { topOrigin: overrides.topOrigin } : {}) }));
   }
   function authenticatorData(overrides: Overrides, attested: boolean): Uint8Array {
-    const flags = (overrides.userPresent === false ? 0 : 1) | (overrides.userVerified === false ? 0 : 4) | (attested ? 64 : 0);
+    const flags = (overrides.userPresent === false ? 0 : 1) | (overrides.userVerified === false ? 0 : 4) | (attested ? 64 : 0) | (overrides.backupEligible ? 8 : 0) | (overrides.backedUp ? 16 : 0);
     const prefix = concat(hash(overrides.rpID ?? rpID), new Uint8Array([flags]), uint32(overrides.counter ?? counter));
     return attested ? concat(prefix, new Uint8Array(16), new Uint8Array([credentialID.length >> 8, credentialID.length & 255]), credentialID, publicKey) : prefix;
   }
@@ -51,7 +51,7 @@ export function makeAuthenticator(rpID: string, origin: string) {
       userHandle = options.user.id;
       counter = overrides.counter ?? 0;
       const attestationObject = cbor(new Map<CborValue, CborValue>([['fmt', 'none'], ['attStmt', new Map()], ['authData', authenticatorData(overrides, true)]]));
-      return { id, rawId: id, type: 'public-key', authenticatorAttachment: 'platform', clientExtensionResults: {}, response: { clientDataJSON: encode(clientData('webauthn.create', options.challenge, overrides)), attestationObject: encode(attestationObject), transports: ['internal'] } };
+      return { id, rawId: id, type: 'public-key', authenticatorAttachment: 'platform', clientExtensionResults: {}, response: { clientDataJSON: encode(clientData('webauthn.create', options.challenge, overrides)), attestationObject: encode(attestationObject), transports: overrides.transports ?? ['internal'] } };
     },
     authenticate(options: PublicKeyCredentialRequestOptionsJSON, overrides: Overrides = {}): AuthenticationResponseJSON {
       counter = overrides.counter ?? counter + 1;

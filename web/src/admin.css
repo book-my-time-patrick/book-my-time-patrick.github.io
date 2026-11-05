@@ -113,3 +113,5 @@
 .admin-setup-manual summary { color: var(--blue); cursor: pointer; font-size: 12px; line-height: 1.8; }
 .admin-setup-success-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; margin-bottom: 17px; background: #edf3ff; color: #315890; font-size: 24px; }
 .admin-setup-success .admin-help { margin-bottom: 20px; }
+.admin-diagnostic { margin: 9px 0 4px; font: 11px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+#reauth-step { margin-top: 16px; }

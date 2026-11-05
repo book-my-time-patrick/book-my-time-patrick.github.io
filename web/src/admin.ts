@@ -6,6 +6,8 @@ import { createSetupQr } from './qr';
 type Time = string | number;
 type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
 type AuthenticationOptions = Parameters<typeof startAuthentication>[0]['optionsJSON'];
+type RegistrationResult = Awaited<ReturnType<typeof startRegistration>>;
+interface DeviceChoice { deviceName: string; remember: boolean }
 interface Permissions { modules: string[]; modes: string[] }
 interface Session { id: string; label: string; os: string; browser: string; createdAt: Time; lastSeenAt: Time; expiresAt: Time; current: boolean; recentAuthUntil?: Time }
 interface Me { id: string; name: string; session: Session }
@@ -14,19 +16,35 @@ interface Passkey { id: string; name: string; createdAt: Time; lastUsedAt: Time 
 interface Options<T> { flowId: string; options: T }
 interface Setup extends Options<RegistrationOptions> { totpSecret: string; totpUri: string }
 class StaleRequestError extends Error {}
-class ApiError extends Error { constructor(public status: number, public code: string) { super(code); } }
+class ApiError extends Error {
+  constructor(public status: number, public code: string, public phase = 'ADMIN_API', public ray = '') { super(code); }
+}
+function diagnosticFor(error: unknown): string {
+  return JSON.stringify(error instanceof ApiError ? { error: error.code, httpStatus: error.status, phase: error.phase, ...(error.ray ? { cfRay: error.ray } : {}) } : { error: 'CLIENT_AUTHENTICATION_ERROR', phase: 'SYSTEM_AUTH' });
+}
+function requestPhase(path: string): string {
+  const phases: Record<string, string> = { '/admin/setup/options': 'SETUP_START', '/admin/setup/verify': 'SETUP_VERIFY', '/admin/login/options': 'LOGIN_START', '/admin/login/verify': 'LOGIN_VERIFY', '/admin/reauth/options': 'REAUTH_START', '/admin/reauth/verify': 'REAUTH_VERIFY', '/admin/me': 'SESSION_CHECK', '/admin/status': 'ADMIN_STATUS' };
+  return phases[path] ?? 'ADMIN_API';
+}
 
 function messageFor(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === 'SETUP_FLOW_EXPIRED') return '这次绑定流程已过期，请重新开始绑定。';
+    if (error.code === 'PASSKEY_CONTEXT_NOT_SUPPORTED') return '请在独立 Chrome 或 Safari 窗口直接打开主站后台，应用内嵌页面不能完成此验证。';
+    if (error.code === 'PASSKEY_VERIFICATION_FAILED') return '系统已返回通行密钥，但服务端未能验证。请重新开始，并保留下面的诊断信息。';
+    if (error.code === 'TOTP_INVALID') return '动态码不正确或已经刷新。请使用刚扫码添加的账户里的最新六位码，无需重新扫码。';
+    if (error.code === 'SETUP_STORAGE_FAILED') return '服务端暂时未能保存绑定。请保留诊断信息，稍后再试。';
+    if (error.code === 'NETWORK_ERROR') return '暂时无法连接认证服务，请检查网络后重试。';
+    if (error.code === 'WORKER_CPU_LIMIT') return '认证服务触发运行时计算限制，未能完成请求。请保留诊断信息。';
     if (error.status === 429) return '操作较频繁，请稍等几分钟后再试。';
     if (error.code === 'SETUP_UNAVAILABLE') return '初始化码无效、已过期或设置已经完成，请使用最新提供的专属初始化码。';
     if (error.code === 'REAUTH_REQUIRED') return '请再次验证身份后重试刚才的操作。';
     if (error.code === 'LAST_PASSKEY' || error.code === 'LAST_CREDENTIAL') return '至少需要保留一把通行密钥，请先添加另一把。';
     if (error.status === 503) return '管理服务暂时无法使用，请稍后重试。';
-    if (error.status === 401) return '验证未通过或登录已失效。请取最新的动态码后重新验证，已经使用的动态码不能重复使用。';
+    if (error.status === 401) return '验证未通过或登录已失效。请选择此前成功绑定的通行密钥，重新进行系统验证。';
     if (error.status === 404) return '这条记录已不可用，请刷新列表。';
     if (error.status === 409) return '状态已发生变化，请刷新后重试。';
-    if (error.status === 400 || error.status === 403) return '验证未通过。请检查验证码，必要时重新开始。';
+    if (error.status === 400 || error.status === 403) return '验证未通过。请重新进行系统验证，或保留下方诊断信息。';
     return '操作未完成，请稍后重试。';
   }
   if (error instanceof Error && error.name === 'InvalidStateError') return '这台设备可能已保存本站的通行密钥，请使用其他保存位置或设备。';
@@ -62,6 +80,8 @@ export function renderAdmin(root: HTMLElement): () => void {
   let setup: Setup | null = null;
   let currentDialog: HTMLDialogElement | null = null;
   let setupSuccessVisible = false;
+  let pendingSetup: { flow: Setup; response: RegistrationResult; device: DeviceChoice } | null = null;
+  let setupSubmitting = false;
   const recentLinks = new Map<string, string>();
   const rootIsCurrent = (version: number) => alive && revision === version;
 
@@ -72,6 +92,15 @@ export function renderAdmin(root: HTMLElement): () => void {
     element.className = `admin-banner${error ? ' error' : ''}`;
     element.textContent = message;
   }
+  function reportError(error: unknown, fallback?: string, target = root.querySelector<HTMLElement>('#admin-message')) {
+    if (!alive || !target) return;
+    target.className = 'admin-banner error';
+    target.textContent = fallback ?? messageFor(error);
+    const detail = document.createElement('p'); detail.className = 'admin-diagnostic'; detail.textContent = diagnosticFor(error);
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button'; button.textContent = '复制诊断信息';
+    button.addEventListener('click', () => { const text = detail.textContent ?? ''; void copyText(text).then(ok => { if (alive && button.isConnected) button.textContent = ok ? '诊断信息已复制' : '请手动复制上方诊断信息'; }); });
+    target.append(detail, button);
+  }
   function shell(content: string, signedIn = false): number {
     revision += 1;
     root.innerHTML = `<main class="admin-page"><header class="admin-header"><a class="admin-wordmark" href="#/admin"><i aria-hidden="true">↗</i>受邀预约 <span class="stage">管理后台</span></a>${signedIn ? `<div class="admin-header-actions"><span class="admin-current-name">${e(me?.session.label || '当前设备')}</span><button class="text-button" type="button" id="admin-logout">退出登录</button></div>` : '<a class="text-button" href="#/">返回首页</a>'}</header>${content}<footer class="admin-footer">仅供管理员使用。邀请与个人资料由服务端验证访问权限。</footer></main>`;
@@ -80,26 +109,47 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   function clearPrivate() {
     identityVersion += 1;
-    me = null; setup = null; recentLinks.clear(); setupSuccessVisible = false;
+    me = null; setup = null; pendingSetup = null; setupSubmitting = false; recentLinks.clear(); setupSuccessVisible = false;
     currentDialog?.close(); currentDialog?.remove(); currentDialog = null;
     WebAuthnAbortService.cancelCeremony();
   }
   async function request<T = { ok: boolean }>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
     const identity = identityVersion;
-    const response = await fetch(`/api${path}`, {
-      method, credentials: 'same-origin', cache: 'no-store', referrerPolicy: 'no-referrer', signal: controller.signal,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+    const phase = requestPhase(path);
+    let response: Response;
+    try {
+      response = await fetch(`/api${path}`, {
+        method, credentials: 'same-origin', cache: 'no-store', referrerPolicy: 'no-referrer', signal: controller.signal,
+        headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (error) {
+      if (!alive || identity !== identityVersion || error instanceof Error && error.name === 'AbortError') throw new StaleRequestError();
+      throw new ApiError(0, 'NETWORK_ERROR', phase);
+    }
+    const rayHeader = response.headers.get('cf-ray') ?? '';
+    const ray = /^[a-f0-9]{8,32}(?:-[A-Z]{3,5})?$/i.test(rayHeader) ? rayHeader : '';
     let data: unknown;
-    try { data = await response.json(); } catch { throw new ApiError(503, 'INVALID_RESPONSE'); }
+    try {
+      const raw = await response.text();
+      try { data = JSON.parse(raw); }
+      catch {
+        if (response.status === 401 && me && !path.endsWith('/verify')) { clearPrivate(); showLogin('登录已失效，请重新验证。'); }
+        throw new ApiError(response.status, /(?:error(?:\s+code)?\s*:?\s*1102\b|cf-error-code[^>]*>\s*1102\b)/i.test(raw) ? 'WORKER_CPU_LIMIT' : 'INVALID_RESPONSE', phase, ray);
+      }
+    } catch (error) {
+      if (!alive || identity !== identityVersion) throw new StaleRequestError();
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(response.status, 'NETWORK_ERROR', phase, ray);
+    }
     if (!alive || identity !== identityVersion) throw new StaleRequestError();
     if (!response.ok) {
-      if (response.status === 401 && me) { clearPrivate(); showLogin('登录已失效，请重新验证。'); }
-      const code = data && typeof data === 'object' && 'error' in data ? String(data.error) : 'REQUEST_FAILED';
-      throw new ApiError(response.status, code);
+      const returned = data && typeof data === 'object' && 'error' in data ? String(data.error) : '';
+      const code = /^[A-Z][A-Z0-9_]{1,63}$/.test(returned) ? returned : 'REQUEST_FAILED';
+      const proofFailure = path.endsWith('/verify') && ['AUTHENTICATION_FAILED', 'TOTP_INVALID', 'PASSKEY_VERIFICATION_FAILED', 'PASSKEY_CONTEXT_NOT_SUPPORTED', 'SETUP_FLOW_EXPIRED'].includes(code);
+      if (response.status === 401 && me && !proofFailure) { clearPrivate(); showLogin('登录已失效，请重新验证。'); }
+      throw new ApiError(response.status, code, phase, ray);
     }
-    if (!alive) throw new DOMException('View closed', 'AbortError');
     return data as T;
   }
   async function action(operation: () => Promise<void>, button?: HTMLButtonElement) {
@@ -113,7 +163,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       if (error instanceof ApiError && error.code === 'REAUTH_REQUIRED' && me) {
         await showReauth();
       } else {
-        banner(messageFor(error), true);
+        reportError(error);
         const loading = root.querySelector<HTMLElement>('#admin-content > .admin-loading');
         if (loading) {
           loading.textContent = '未能读取内容。';
@@ -123,9 +173,9 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     } finally { if (button?.isConnected) button.disabled = false; }
   }
-  function showLogin(message = '', configured = true) {
-    me = null; setup = null; recentLinks.clear();
-    shell(`<section class="admin-auth"><p class="eyebrow">YOUR PRIVATE DESK</p><h1>欢迎回来。</h1><p class="admin-copy">使用这台设备的通行密钥，或按系统提示通过手机验证。无需输入账号和密码。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><section class="admin-card">${configured ? `<form id="login-form"><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="这台设备" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 6 个月</label><button class="primary" type="submit">使用通行密钥登录 <span aria-hidden="true">↗</span></button></form><p class="admin-help">Face ID、Touch ID、Windows Hello 或系统提供的手机验证方式均由设备处理。动态码来自你绑定的身份验证器。手机扫码可能需要一些时间；若动态码已刷新，请取新码重新尝试。</p>` : '<h2>后台尚未初始化</h2><p class="admin-copy">请使用单独提供的初始化码，绑定第一把通行密钥与身份验证器。后台网址本身不授予注册权限。</p>'}</section></section>`);
+  function showLogin(message = '', configured = true, device: DeviceChoice = { deviceName: '这台设备', remember: true }) {
+    me = null; setup = null; pendingSetup = null; recentLinks.clear();
+    const version = shell(`<section class="admin-auth"><p class="eyebrow">YOUR PRIVATE DESK</p><h1>欢迎回来。</h1><p class="admin-copy">使用已绑定的通行密钥登录，无需输入账号、密码或六位动态码。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><section class="admin-card">${configured ? `<form id="login-form"><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="${e(device.deviceName)}" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" ${device.remember ? 'checked' : ''}>记住这台设备，最长 6 个月</label><button class="primary" type="submit">使用通行密钥登录 <span aria-hidden="true">↗</span></button></form><p class="admin-help">系统会提供 Touch ID、Face ID、Windows Hello 或设备解锁等可用方式。如有多把同名通行密钥，请选择此前成功绑定的一把；可以先在 Safari 保持已登录。关闭页面后，有效会话内可以直接返回；点击退出会结束当前登录。</p>` : '<h2>后台尚未初始化</h2><p class="admin-copy">请使用单独提供的初始化码，绑定第一把通行密钥与身份验证器。后台网址本身不授予注册权限。</p>'}</section></section>`);
     banner(message, Boolean(message && message !== '已退出这台设备。'));
     const form = root.querySelector<HTMLFormElement>('#login-form');
     form?.addEventListener('submit', (event) => {
@@ -133,24 +183,47 @@ export function renderAdmin(root: HTMLElement): () => void {
       const button = form.querySelector<HTMLButtonElement>('button')!;
       void action(async () => {
         if (!window.PublicKeyCredential) { banner('当前浏览器不支持通行密钥，请使用最新版 Safari、Edge 或 Chrome。', true); return; }
-        const code = formValue(form, 'code');
-        const deviceName = formValue(form, 'deviceName');
-        const remember = new FormData(form).has('remember');
+        const chosen = { deviceName: formValue(form, 'deviceName'), remember: new FormData(form).has('remember') };
         banner('请完成系统弹出的通行密钥验证。');
-        const options = await request<Options<AuthenticationOptions>>('/admin/login/options', {});
-        if (!alive) return;
-        const response = await startAuthentication({ optionsJSON: options.options });
-        await request('/admin/login/verify', { flowId: options.flowId, response, code, deviceName, remember });
-        form.reset();
-        me = await request<Me>('/admin/me');
-        if (!alive) return;
-        setupToken = '';
-        history.replaceState(null, '', '#/admin');
-        showDashboard();
+        const flow = await request<Options<AuthenticationOptions>>('/admin/login/options', {});
+        if (!rootIsCurrent(version)) return;
+        const response = await startAuthentication({ optionsJSON: flow.options });
+        if (!rootIsCurrent(version)) return;
+        let verified = false;
+        try {
+          await request('/admin/login/verify', { flowId: flow.flowId, response, ...chosen });
+          verified = true; form.reset();
+          const account = await request<Me>('/admin/me');
+          if (!rootIsCurrent(version)) return;
+          me = account; setupToken = ''; history.replaceState(null, '', '#/admin'); showDashboard();
+        } catch (error) {
+          if (!rootIsCurrent(version) || error instanceof StaleRequestError) return;
+          if (verified || error instanceof ApiError && (error.status === 0 || error.status >= 500)) {
+            try {
+              const account = await request<Me>('/admin/me');
+              if (!rootIsCurrent(version)) return;
+              me = account; history.replaceState(null, '', '#/admin'); showDashboard(); return;
+            } catch (confirmation) {
+              if (!rootIsCurrent(version) || confirmation instanceof StaleRequestError) return;
+              if (!(confirmation instanceof ApiError && confirmation.status === 401)) { showLoginConnectionRetry(error, chosen); return; }
+            }
+          }
+          showLogin('', true, chosen); reportError(error);
+        }
       }, button);
     });
   }
+  function showLoginConnectionRetry(error: unknown, device: DeviceChoice) {
+    const version = shell('<section class="admin-auth"><p class="eyebrow">CONFIRM YOUR SESSION</p><h1>请重新确认连接。</h1><p class="admin-copy">暂时未能确认登录结果。先重新连接后台，避免重复提交已经使用的验证。</p><div id="admin-message" class="admin-banner" role="status"></div><button class="secondary" id="confirm-login" type="button">重新连接后台</button></section>');
+    reportError(error);
+    const button = root.querySelector<HTMLButtonElement>('#confirm-login')!;
+    button.addEventListener('click', () => void action(async () => {
+      try { const account = await request<Me>('/admin/me'); if (rootIsCurrent(version)) { me = account; showDashboard(); } }
+      catch (failure) { if (!rootIsCurrent(version) || failure instanceof StaleRequestError) return; if (failure instanceof ApiError && failure.status === 401) { showLogin('', true, device); reportError(failure); } else throw failure; }
+    }, button));
+  }
   function showSetup() {
+    pendingSetup = null;
     const version = shell(`<section class="admin-auth"><p class="eyebrow">FIRST-TIME SETUP</p><h1>设置你的管理入口。</h1><p class="admin-copy">使用单独提供的初始化码，绑定通行密钥与身份验证器。后台网址本身不能授权注册。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><section class="admin-card" id="setup-card"><h2>准备两种验证方式</h2><p class="admin-copy">准备系统通行密钥与支持六位动态码的身份验证器。初始化码仅首次设置需要，完成后失效，请勿转发。</p><form id="start-setup-form">${setupToken ? '' : '<label class="admin-field">专属初始化码<input type="password" name="setupToken" autocomplete="off" minlength="32" maxlength="256" spellcheck="false" required></label>'}<button class="primary" type="submit" id="start-setup">验证初始化码并开始 <span aria-hidden="true">↗</span></button></form></section></section>`);
     const startForm = root.querySelector<HTMLFormElement>('#start-setup-form')!;
     startForm.addEventListener('submit', (event) => {
@@ -161,7 +234,7 @@ export function renderAdmin(root: HTMLElement): () => void {
         setup = await request<Setup>('/admin/setup/options', { setupToken });
         if (!rootIsCurrent(version)) { setup = null; return; }
         const card = root.querySelector<HTMLElement>('#setup-card')!;
-        card.innerHTML = `<h2>01 · 扫码绑定身份验证器</h2><p class="admin-copy">用身份验证器扫描下方二维码，获取六位动态码。Microsoft Authenticator 中选择「添加账户 → 其他账户」后扫码。</p><div class="admin-setup-qr" id="setup-qr" role="status" aria-live="polite">正在生成二维码…</div><p class="admin-help">二维码在当前浏览器生成，不会将设置密钥发送给外部二维码服务。</p><details class="admin-setup-manual" id="setup-manual"><summary>无法扫码？手动添加</summary><p class="admin-copy">如果正在同一部手机上设置，可复制下方设置密钥，在身份验证器中手动添加，账户名称填写「受邀预约」。</p><div class="admin-seed" id="setup-secret"></div><div class="admin-actions"><button class="secondary" type="button" id="copy-secret">复制设置密钥</button><button class="text-button" type="button" id="copy-otpauth">复制验证器链接</button></div></details><p class="admin-help">请在 5 分钟内完成。二维码与设置密钥只在本次设置中显示，不要发送给他人。</p><hr class="admin-divider"><h2>02 · 保存通行密钥</h2><form id="setup-form"><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="我的第一台设备" autocomplete="off" required></label><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 6 个月</label><button class="primary" type="submit">保存通行密钥并完成设置 <span aria-hidden="true">↗</span></button></form>`;
+        card.innerHTML = `<h2>01 · 扫码绑定身份验证器</h2><p class="admin-copy">用身份验证器扫描下方二维码，获取六位动态码。Microsoft Authenticator 中选择「添加账户 → 其他账户」后扫码。</p><div class="admin-setup-qr" id="setup-qr" role="status" aria-live="polite">正在生成二维码…</div><p class="admin-help">二维码在当前浏览器生成，不会将设置密钥发送给外部二维码服务。</p><details class="admin-setup-manual" id="setup-manual"><summary>无法扫码？手动添加</summary><p class="admin-copy">如果正在同一部手机上设置，可复制下方设置密钥，在身份验证器中手动添加，账户名称填写「受邀预约」。</p><div class="admin-seed" id="setup-secret"></div><div class="admin-actions"><button class="secondary" type="button" id="copy-secret">复制设置密钥</button><button class="text-button" type="button" id="copy-otpauth">复制验证器链接</button></div></details><p class="admin-help">请在 5 分钟内完成。二维码与设置密钥只在本次设置中显示，不要发送给他人。</p><hr class="admin-divider"><h2>02 · 保存通行密钥</h2><form id="setup-form"><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="我的第一台设备" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" checked>记住这台设备，最长 6 个月</label><p class="admin-help">先完成系统保存，下一步再输入最新动态码。</p><button class="primary" type="submit">保存通行密钥 <span aria-hidden="true">↗</span></button></form>`;
         const currentSetup = setup;
         const qr = card.querySelector<HTMLElement>('#setup-qr')!;
         void createSetupQr(currentSetup.totpUri).then((image) => {
@@ -179,34 +252,65 @@ export function renderAdmin(root: HTMLElement): () => void {
           event.preventDefault();
           void action(async () => {
             if (!setup) return;
+            if (pendingSetup) { await submitSetupCode(form, card, version); return; }
             const currentSetup = setup;
-            const code = formValue(form, 'code');
-            const deviceName = formValue(form, 'deviceName');
-            const remember = new FormData(form).has('remember');
-            banner('请按照系统提示保存通行密钥。');
-            let registered = false;
-            let saved = false;
-            try {
-              const response = await startRegistration({ optionsJSON: currentSetup.options });
-              registered = true;
-              await request('/admin/setup/verify', { flowId: currentSetup.flowId, response, code, deviceName, remember });
-              saved = true;
-              setup = null; setupToken = ''; form.reset();
-              card.replaceChildren();
-              const confirming = document.createElement('p'); confirming.className = 'admin-copy'; confirming.textContent = '正在确认管理会话…'; card.append(confirming);
-              history.replaceState(null, '', '#/admin');
-              me = await request<Me>('/admin/me');
-              if (rootIsCurrent(version)) showSetupSuccess();
-            } catch (error) {
-              if (!rootIsCurrent(version) || error instanceof StaleRequestError) return;
-              if (saved) { me = null; showSavedSetupConfirmation(error); }
-              else if (registered) { setup = null; showSetup(); banner('本次设置未完成，请重新开始并使用新生成的验证器密钥。', true); }
-              else throw error;
-            }
-          }, form.querySelector<HTMLButtonElement>('button')!);
+            const device = { deviceName: formValue(form, 'deviceName'), remember: new FormData(form).has('remember') };
+            banner('请按照系统提示保存通行密钥；完成后再输入动态码。');
+            const response = await startRegistration({ optionsJSON: currentSetup.options });
+            if (!rootIsCurrent(version) || setup !== currentSetup) return;
+            pendingSetup = { flow: currentSetup, response, device };
+            form.innerHTML = '<h2>03 · 输入最新六位动态码</h2><p class="admin-copy">系统保存已完成。现在打开刚扫码添加的验证器账户，填写当前六位数字；无需再次扫码。</p><label class="admin-field">最新动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required autofocus></label><div class="admin-actions"><button class="primary" type="submit">验证动态码并完成绑定</button><button class="text-button" id="restart-setup-proof" type="button">重新选择通行密钥</button></div>';
+            form.querySelector('#restart-setup-proof')!.addEventListener('click', () => {
+              if (setupSubmitting) return;
+              const current = pendingSetup; pendingSetup = null;
+              form.innerHTML = `<label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="${e(current?.device.deviceName ?? '我的第一台设备')}" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" ${current?.device.remember === false ? '' : 'checked'}>记住这台设备，最长 6 个月</label><p class="admin-help">完成系统保存后再填写最新动态码。</p><button class="primary" type="submit">保存通行密钥 <span aria-hidden="true">↗</span></button>`;
+              banner('可以重新完成系统验证，无需重新扫码。');
+            });
+            banner('请填写最新动态码，完成服务端绑定确认。');
+            form.querySelector<HTMLInputElement>('[name="code"]')!.focus();
+          }, form.querySelector<HTMLButtonElement>('[type="submit"]')!);
         });
       }, startForm.querySelector<HTMLButtonElement>('button')!);
     });
+  }
+  async function submitSetupCode(form: HTMLFormElement, card: HTMLElement, version: number) {
+    const current = pendingSetup;
+    if (!current || setupSubmitting) return;
+    setupSubmitting = true;
+    try {
+      try {
+        await request('/admin/setup/verify', { flowId: current.flow.flowId, response: current.response, code: formValue(form, 'code'), ...current.device });
+      } catch (error) {
+        if (!rootIsCurrent(version) || error instanceof StaleRequestError) return;
+        const input = form.querySelector<HTMLInputElement>('[name="code"]');
+        if (input) input.value = '';
+        if (error instanceof ApiError && error.code === 'TOTP_INVALID') {
+          reportError(error); input?.focus(); return;
+        }
+        pendingSetup = null;
+        if (!(error instanceof ApiError) || error.status === 0 || error.status >= 500 || error.code === 'SETUP_UNAVAILABLE') {
+          try {
+            const status = await request<{ configured: boolean }>('/admin/status');
+            if (!rootIsCurrent(version)) return;
+            if (status.configured) { setup = null; setupToken = ''; showSavedSetupConfirmation(error); return; }
+          } catch (confirmation) {
+            if (!rootIsCurrent(version) || confirmation instanceof StaleRequestError) return;
+            showSavedSetupConfirmation(error, false); return;
+          }
+        }
+        if (!rootIsCurrent(version)) return;
+        reportError(error);
+        form.innerHTML = '<p class="admin-copy">这次验证未完成。请先查看上方失败阶段；重新开始时会生成新的二维码，应使用新二维码绑定验证器。</p><button class="secondary" id="restart-setup" type="button">重新开始绑定</button>';
+        form.querySelector('#restart-setup')!.addEventListener('click', () => { setup = null; showSetup(); });
+        return;
+      }
+      if (!rootIsCurrent(version)) return;
+      pendingSetup = null; setup = null; setupToken = ''; form.reset(); card.replaceChildren();
+      const confirming = document.createElement('p'); confirming.className = 'admin-copy'; confirming.textContent = '正在确认管理会话…'; card.append(confirming);
+      history.replaceState(null, '', '#/admin');
+      try { const account = await request<Me>('/admin/me'); if (rootIsCurrent(version)) { me = account; showSetupSuccess(); } }
+      catch (error) { if (rootIsCurrent(version) && !(error instanceof StaleRequestError)) { me = null; showSavedSetupConfirmation(error); } }
+    } finally { setupSubmitting = false; }
   }
   function showSetupSuccess() {
     if (!alive || !me) return;
@@ -228,18 +332,26 @@ export function renderAdmin(root: HTMLElement): () => void {
     root.append(dialog); dialog.showModal();
     dialog.querySelector<HTMLButtonElement>('button')!.focus();
   }
-  function showSavedSetupConfirmation(error: unknown) {
-    const version = shell(`<section class="admin-auth"><p class="eyebrow">CONFIRM YOUR SESSION</p><h1>请重新确认连接。</h1><p class="admin-copy">绑定信息已经保存，暂时未能确认登录状态。无需再次扫码绑定，请重新连接后台。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><button class="secondary" id="confirm-saved-setup" type="button">重新连接后台</button></section>`);
-    banner(messageFor(error), true);
+  function showSavedSetupConfirmation(error: unknown, confirmed = true) {
+    pendingSetup = null;
+    const copy = confirmed ? '后台已完成绑定，暂时未能确认登录状态。无需再次扫码，请重新连接或使用已有通行密钥登录。' : '请求结果暂时未能确认，请先重新连接检查状态。暂时不要重新扫码绑定。';
+    const version = shell(`<section class="admin-auth"><p class="eyebrow">CONFIRM YOUR SESSION</p><h1>请重新确认连接。</h1><p class="admin-copy">${copy}</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><button class="secondary" id="confirm-saved-setup" type="button">重新连接后台</button></section>`);
+    reportError(error);
     const button = root.querySelector<HTMLButtonElement>('#confirm-saved-setup')!;
     button.addEventListener('click', () => void action(async () => {
       try {
-        const current = await request<Me>('/admin/me');
-        if (rootIsCurrent(version)) { me = current; showSetupSuccess(); }
+        if (!confirmed) {
+          const status = await request<{ configured: boolean }>('/admin/status');
+          if (!rootIsCurrent(version)) return;
+          if (!status.configured) { setup = null; showSetup(); banner('尚未完成后台绑定，请重新开始并使用新生成的二维码。', true); return; }
+          confirmed = true; setup = null; setupToken = '';
+        }
+        const account = await request<Me>('/admin/me');
+        if (rootIsCurrent(version)) { me = account; showSetupSuccess(); }
       } catch (failure) {
         if (!rootIsCurrent(version) || failure instanceof StaleRequestError) return;
-        if (failure instanceof ApiError && failure.status === 401) {
-          clearPrivate(); showLogin('绑定信息已保存，请使用通行密钥和新的动态码登录。');
+        if (failure instanceof ApiError && failure.status === 401 && confirmed) {
+          clearPrivate(); showLogin('后台已完成绑定，请使用已有通行密钥登录。');
         } else throw failure;
       }
     }, button));
@@ -400,22 +512,36 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   async function showReauth(): Promise<void> {
     if (!alive || !me || currentDialog) return;
+    const sessionId = me.session.id;
     return new Promise((resolve) => {
       const dialog = document.createElement('dialog'); currentDialog = dialog; dialog.className = 'admin-dialog';
-      dialog.innerHTML = '<h2>再确认一次，是你本人。</h2><p class="admin-copy">这项操作需要近期身份验证。完成后，刚才填写的内容会保留。</p><form><label class="admin-field">身份验证器的六位动态码<input class="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label><p class="admin-copy" role="status" id="reauth-message"></p><div class="admin-actions"><button class="text-button" id="cancel-reauth" type="button">取消</button><button class="primary" type="submit">使用通行密钥验证</button></div></form>';
+      dialog.innerHTML = '<h2>再确认一次，是你本人。</h2><p class="admin-copy">这项操作需要系统通行密钥验证，无需填写六位动态码。完成后，刚才填写的内容会保留。</p><div class="admin-copy" role="status" id="reauth-message"></div><form id="reauth-step"><div class="admin-actions"><button class="text-button" id="cancel-reauth" type="button">取消</button><button class="primary" type="submit">使用通行密钥确认身份</button></div></form>';
+      const isCurrent = () => alive && currentDialog === dialog && dialog.isConnected && me?.session.id === sessionId;
+      let busy = false;
       dialog.querySelector('#cancel-reauth')!.addEventListener('click', () => dialog.close());
-      dialog.addEventListener('close', () => { dialog.remove(); if (currentDialog === dialog) currentDialog = null; WebAuthnAbortService.cancelCeremony(); resolve(); }, { once: true });
+      dialog.addEventListener('close', () => {
+        const current = currentDialog === dialog;
+        dialog.remove();
+        if (current) { currentDialog = null; WebAuthnAbortService.cancelCeremony(); }
+        resolve();
+      }, { once: true });
       const form = dialog.querySelector<HTMLFormElement>('form')!;
-      form.addEventListener('submit', (event) => {
-        event.preventDefault(); const button = form.querySelector<HTMLButtonElement>('[type="submit"]')!; if (button.disabled) return; button.disabled = true;
+      form.addEventListener('submit', event => {
+        event.preventDefault(); if (busy || !isCurrent()) return; busy = true;
+        const button = form.querySelector<HTMLButtonElement>('[type="submit"]')!; button.disabled = true;
+        dialog.querySelector('#reauth-message')!.textContent = '请完成系统弹出的通行密钥验证。';
         void (async () => {
           try {
-            const options = await request<Options<AuthenticationOptions>>('/admin/reauth/options', {});
-            const response = await startAuthentication({ optionsJSON: options.options });
-            await request('/admin/reauth/verify', { flowId: options.flowId, response, code: formValue(form, 'code') });
-            form.reset(); dialog.close(); banner('身份验证完成，请再次点击刚才的操作。');
-          } catch (error) { if (dialog.isConnected) dialog.querySelector('#reauth-message')!.textContent = messageFor(error); }
-          finally { button.disabled = false; }
+            const flow = await request<Options<AuthenticationOptions>>('/admin/reauth/options', {});
+            if (!isCurrent()) return;
+            const response = await startAuthentication({ optionsJSON: flow.options });
+            if (!isCurrent()) return;
+            await request('/admin/reauth/verify', { flowId: flow.flowId, response });
+            if (!isCurrent()) return;
+            dialog.close(); banner('身份验证完成，请再次点击刚才的操作。');
+          } catch (error) {
+            if (isCurrent() && !(error instanceof StaleRequestError)) reportError(error, undefined, dialog.querySelector<HTMLElement>('#reauth-message'));
+          } finally { busy = false; if (button.isConnected) button.disabled = false; }
         })();
       });
       root.append(dialog); dialog.showModal();
@@ -433,7 +559,8 @@ export function renderAdmin(root: HTMLElement): () => void {
     } catch (error) { if (rootIsCurrent(version)) showUnavailable(error); }
   }
   function showUnavailable(error: unknown) {
-    shell(`<section class="admin-auth"><p class="eyebrow">PRIVATE DESK</p><h1>暂时无法连接后台。</h1><p class="admin-copy">${e(messageFor(error))}</p><button class="secondary" id="retry-admin" type="button">重新连接</button></section>`);
+    shell('<section class="admin-auth"><p class="eyebrow">PRIVATE DESK</p><h1>暂时无法连接后台。</h1><div id="admin-message" class="admin-banner" role="status"></div><button class="secondary" id="retry-admin" type="button">重新连接</button></section>');
+    reportError(error);
     root.querySelector('#retry-admin')!.addEventListener('click', () => void initialize());
   }
   let checkingSession = false;

@@ -47,10 +47,11 @@ try {
   assert.equal(response.status,expected,`${path}: ${response.status} ${value.error??''}`);
   return {data:value,response};
  }
- phase='HTTPS readiness';
+ phase='HTTPS and secret-binding readiness';
  let ready=false;
- for(let attempt=0;attempt<4&&!ready;attempt++){try{const response=await fetch(`${site}${prefix}/api/health`,{dispatcher:client.dispatcher,signal:AbortSignal.timeout(12000)});await response.text();ready=response.status===200;}catch{} if(!ready)await new Promise(resolve=>setTimeout(resolve,2000));}
- if(!ready)throw new Error('isolated HTTPS path not reachable');
+ // Secret updates deploy new versions; a public health response can precede their propagation.
+ for(let attempt=0;attempt<12&&!ready;attempt++){try{const response=await fetch(`${site}${prefix}/api/admin/me`,{headers:{Origin:site},dispatcher:client.dispatcher,signal:AbortSignal.timeout(12000)});const value=await response.json();ready=response.status===401&&value.error==='UNAUTHENTICATED';}catch{} if(!ready)await new Promise(resolve=>setTimeout(resolve,2000));}
+ if(!ready)throw new Error('isolated authentication bindings not ready');
  assert.equal((await call('/api/admin/status')).data.configured,false);
  await call('/api/admin/setup/options','POST',{setupToken:'incorrect'},403);
  const setup=(await call('/api/admin/setup/options','POST',{setupToken})).data;
@@ -72,10 +73,12 @@ try {
  await call(`/api/admin/invites/${issued.invite.id}`,'DELETE',{});
  await call('/api/invite','GET',undefined,404,{Authorization:`Bearer ${issued.token}`});
  const flow=(await call('/api/admin/login/options','POST',{})).data;
- const loginBody={flowId:flow.flowId,response:authenticator.authenticate(flow.options),code:totp(setup.totpSecret),deviceName:'Synthetic mobile',remember:true};
+ const loginBody={flowId:flow.flowId,response:authenticator.authenticate(flow.options),deviceName:'Synthetic mobile',remember:true};
  const login=await call('/api/admin/login/verify','POST',loginBody);
  cookie=login.response.headers.get('set-cookie')?.split(';')[0]??''; assert.ok(cookie&&cookie!==firstCookie);
  await call('/api/admin/login/verify','POST',loginBody,401);
+ const reauth=(await call('/api/admin/reauth/options','POST',{})).data;
+ await call('/api/admin/reauth/verify','POST',{flowId:reauth.flowId,response:authenticator.authenticate(reauth.options)});
  await call('/api/admin/devices');
  const added=makeAuthenticator(new URL(site).hostname,site);
  const register=(await call('/api/admin/passkeys/options','POST',{})).data;
@@ -84,7 +87,7 @@ try {
  await call('/api/admin/devices/revoke-others','POST',{});
  await call('/api/admin/me','GET',undefined,401,{Cookie:firstCookie});
  const bad=(await call('/api/admin/login/options','POST',{})).data;
- await call('/api/admin/login/verify','POST',{flowId:bad.flowId,response:authenticator.authenticate(bad.options,{badSignature:true}),code:totp(setup.totpSecret,Date.now()+30000)},401);
+ await call('/api/admin/login/verify','POST',{flowId:bad.flowId,response:authenticator.authenticate(bad.options,{badSignature:true})},401);
  await call('/api/admin/logout','POST',{});
  await call('/api/admin/me','GET',undefined,401);
  evidence.passed=true;

@@ -119,21 +119,31 @@ async function saveChallenge(c: C, purpose: Purpose, challenge: string, sessionI
 async function consumeChallenge(c: C, purpose: Purpose, flowId: unknown, sessionId: string | null = null): Promise<Challenge> {
   const id = text(flowId, 64);
   const result = await settings(c).db.prepare('DELETE FROM auth_challenges WHERE id=? AND purpose=? AND expires_at>? AND session_id IS ? RETURNING id,challenge,payload,session_id').bind(id,purpose,Date.now(),sessionId).first<Challenge>();
-  if (!result) throw new AuthError(401, 'AUTHENTICATION_FAILED');
+  if (!result) throw new AuthError(401, purpose === 'setup' ? 'SETUP_FLOW_EXPIRED' : 'AUTHENTICATION_FAILED');
+  return result;
+}
+async function readSetupChallenge(c: C, flowId: unknown): Promise<Challenge> {
+  const id = text(flowId, 64);
+  const result = await settings(c).db.prepare("SELECT id,challenge,payload,session_id FROM auth_challenges WHERE id=? AND purpose='setup' AND expires_at>? AND session_id IS NULL").bind(id, Date.now()).first<Challenge>();
+  if (!result) throw new AuthError(401, 'SETUP_FLOW_EXPIRED');
   return result;
 }
 async function registrationOptions(c: C, userID: string, exclude: Array<{id:string;transports:string}> = []) {
   const { site } = settings(c);
   return generateRegistrationOptions({ rpName: '受邀预约后台', rpID: site.hostname, userName: 'owner', userDisplayName: '管理员', userID: fromBase64url(userID), attestationType: 'none', supportedAlgorithmIDs: [-7], timeout: FIVE_MINUTES, authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, excludeCredentials: exclude.map(item=>({id:item.id,transports:transports(item.transports)})) });
 }
-async function verifyRegistration(c: C, challenge: Challenge, response: unknown) {
+async function verifyRegistration(c: C, challenge: Challenge, response: unknown, setupDiagnostics = false) {
+  const failure = setupDiagnostics ? 'PASSKEY_VERIFICATION_FAILED' : 'AUTHENTICATION_FAILED';
+  const parsed = responseInput<RegistrationResponseJSON>(response);
+  let clientData;
+  try { clientData = decodeClientDataJSON(parsed.response.clientDataJSON); }
+  catch { throw new AuthError(401, failure); }
+  if (clientData.crossOrigin || clientData.topOrigin) throw new AuthError(401, setupDiagnostics ? 'PASSKEY_CONTEXT_NOT_SUPPORTED' : 'AUTHENTICATION_FAILED');
   try {
-    const clientData = decodeClientDataJSON(responseInput<RegistrationResponseJSON>(response).response.clientDataJSON);
-    if (clientData.crossOrigin || clientData.topOrigin) throw new Error();
-    const result = await verifyRegistrationResponse({ response: responseInput<RegistrationResponseJSON>(response), expectedChallenge: challenge.challenge, expectedOrigin: settings(c).site.origin, expectedRPID: settings(c).site.hostname, requireUserVerification: true, requireUserPresence: true, supportedAlgorithmIDs: [-7] });
+    const result = await verifyRegistrationResponse({ response: parsed, expectedChallenge: challenge.challenge, expectedOrigin: settings(c).site.origin, expectedRPID: settings(c).site.hostname, requireUserVerification: true, requireUserPresence: true, supportedAlgorithmIDs: [-7] });
     if (!result.verified || !result.registrationInfo) throw new Error();
     return result.registrationInfo;
-  } catch { throw new AuthError(401, 'AUTHENTICATION_FAILED'); }
+  } catch { throw new AuthError(401, failure); }
 }
 async function verifyAuthentication(c: C, challenge: Challenge, response: unknown) {
   const parsed = responseInput<AuthenticationResponseJSON>(response);
@@ -177,12 +187,17 @@ export function mountAuth(app: Hono<{ Bindings: Environment }>) {
     await rateLimit(c);
     const input = await body(c), { db, key } = settings(c), activation = setupActivation(c);
     if (await db.prepare('SELECT id FROM owners WHERE id=1').first()) throw new AuthError(403,'SETUP_UNAVAILABLE');
-    const challenge = await consumeChallenge(c,'setup',input.flowId);
+    const challenge = await readSetupChallenge(c,input.flowId);
     const pending = JSON.parse(challenge.payload ?? '{}') as {userID:string;cipher:string;activation:{hash:string;expiresAt:number}};
     if (!pending.activation || !equalText(pending.activation.hash,activation.hash) || pending.activation.expiresAt !== activation.expiresAt) throw new AuthError(403,'SETUP_UNAVAILABLE');
-    const registration = await verifyRegistration(c,challenge,input.response);
+    let registration;
+    try { registration = await verifyRegistration(c,challenge,input.response,true); }
+    catch(error) { await consumeChallenge(c,'setup',input.flowId); throw error; }
     const step = await matchingTotpStep(await decryptSecret(pending.cipher,key),text(input.code,6));
-    if (step === null) throw new AuthError(401,'AUTHENTICATION_FAILED');
+    if (step === null) throw new AuthError(401,'TOTP_INVALID');
+    // Only a wrong TOTP may be retried within this same, fixed five-minute flow.
+    // Successful verification still atomically consumes the challenge once.
+    await consumeChallenge(c,'setup',input.flowId);
     const session = newSession(c,registration.credential.id,input);
     try {
       await db.batch([
@@ -190,7 +205,7 @@ export function mountAuth(app: Hono<{ Bindings: Environment }>) {
         db.prepare('INSERT INTO passkeys(id,public_key,counter,transports,name,device_type,backed_up,created_at,last_used_at) VALUES(?,?,?,?,?,?,?,?,?)').bind(registration.credential.id,base64url(registration.credential.publicKey),registration.credential.counter,JSON.stringify(registration.credential.transports ?? []),session.label,registration.credentialDeviceType,registration.credentialBackedUp?1:0,session.now,session.now),
         db.prepare('INSERT INTO sessions(id,token_hash,credential_id,label,os,browser,created_at,last_seen_at,expires_at,recent_auth_at) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(session.id,await sha256(session.token),session.credentialId,session.label,session.os,session.browser,session.now,session.now,session.expiresAt,session.now),
       ]);
-    } catch { throw new AuthError(409,'SETUP_UNAVAILABLE'); }
+    } catch { throw new AuthError(503,'SETUP_STORAGE_FAILED'); }
     issueCookie(c,session.token,session.expiresAt);
     return c.json({ok:true});
   }));
@@ -202,19 +217,16 @@ export function mountAuth(app: Hono<{ Bindings: Environment }>) {
   }));
   app.post('/api/admin/login/verify', endpoint(async c => {
     await rateLimit(c);
-    const input = await body(c), { db, key } = settings(c);
+    const input = await body(c), { db } = settings(c);
     const challenge = await consumeChallenge(c,'login',input.flowId);
     const verified = await verifyAuthentication(c,challenge,input.response);
-    const step = await matchingTotpStep(await decryptSecret(verified.account.totp_cipher,key),text(input.code,6));
-    if (step === null) throw new AuthError(401,'AUTHENTICATION_FAILED');
     const session = newSession(c,verified.key.id,input);
     // Each following statement depends on the preceding CAS succeeding. Zero changes never issues a session.
     const result = await db.batch([
-      db.prepare('UPDATE owners SET totp_last_step=? WHERE id=1 AND totp_last_step<? AND EXISTS(SELECT 1 FROM passkeys WHERE id=? AND counter=? AND revoked_at IS NULL) RETURNING id').bind(step,step,verified.key.id,verified.key.counter),
-      db.prepare('UPDATE passkeys SET counter=?,backed_up=?,last_used_at=? WHERE id=? AND counter=? AND revoked_at IS NULL AND changes()=1 RETURNING id').bind(verified.info.newCounter,verified.info.credentialBackedUp?1:0,session.now,verified.key.id,verified.key.counter),
+      db.prepare('UPDATE passkeys SET counter=?,backed_up=?,last_used_at=? WHERE id=? AND counter=? AND revoked_at IS NULL RETURNING id').bind(verified.info.newCounter,verified.info.credentialBackedUp?1:0,session.now,verified.key.id,verified.key.counter),
       db.prepare('INSERT INTO sessions(id,token_hash,credential_id,label,os,browser,created_at,last_seen_at,expires_at,recent_auth_at) SELECT ?,?,?,?,?,?,?,?,?,? WHERE changes()=1 RETURNING id').bind(session.id,await sha256(session.token),session.credentialId,session.label,session.os,session.browser,session.now,session.now,session.expiresAt,session.now),
     ]);
-    if (!result[2].results.length) throw new AuthError(401,'AUTHENTICATION_FAILED');
+    if (!result[1].results.length) throw new AuthError(401,'AUTHENTICATION_FAILED');
     issueCookie(c,session.token,session.expiresAt);
     return c.json({ok:true});
   }));
@@ -232,17 +244,15 @@ export function mountAuth(app: Hono<{ Bindings: Environment }>) {
   }));
   app.post('/api/admin/reauth/verify', endpoint(async c => {
     const session = await admin(c); await rateLimit(c);
-    const input = await body(c), {db,key} = settings(c);
+    const input = await body(c), {db} = settings(c);
     const challenge = await consumeChallenge(c,'reauth',input.flowId,session.id);
     const verified = await verifyAuthentication(c,challenge,input.response);
-    const now = Date.now(), step = await matchingTotpStep(await decryptSecret(verified.account.totp_cipher,key),text(input.code,6),now);
-    if (step === null) throw new AuthError(401,'AUTHENTICATION_FAILED');
+    const now = Date.now();
     const result = await db.batch([
-      db.prepare(`UPDATE owners SET totp_last_step=? WHERE id=1 AND totp_last_step<? AND EXISTS(SELECT 1 FROM passkeys WHERE id=? AND counter=? AND revoked_at IS NULL) AND EXISTS(SELECT 1 FROM sessions s JOIN passkeys p ON p.id=s.credential_id WHERE s.id=? AND s.revoked_at IS NULL AND s.expires_at>? AND p.revoked_at IS NULL) RETURNING id`).bind(step,step,verified.key.id,verified.key.counter,session.id,now),
-      db.prepare('UPDATE passkeys SET counter=?,backed_up=?,last_used_at=? WHERE id=? AND counter=? AND revoked_at IS NULL AND changes()=1 RETURNING id').bind(verified.info.newCounter,verified.info.credentialBackedUp?1:0,now,verified.key.id,verified.key.counter),
+      db.prepare(`UPDATE passkeys SET counter=?,backed_up=?,last_used_at=? WHERE id=? AND counter=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM sessions s JOIN passkeys p ON p.id=s.credential_id WHERE s.id=? AND s.revoked_at IS NULL AND s.expires_at>? AND p.revoked_at IS NULL) RETURNING id`).bind(verified.info.newCounter,verified.info.credentialBackedUp?1:0,now,verified.key.id,verified.key.counter,session.id,now),
       db.prepare('UPDATE sessions SET recent_auth_at=? WHERE id=? AND revoked_at IS NULL AND expires_at>? AND changes()=1 RETURNING id').bind(now,session.id,now),
     ]);
-    if (!result[2].results.length) throw new AuthError(401,'AUTHENTICATION_FAILED');
+    if (!result[1].results.length) throw new AuthError(401,'AUTHENTICATION_FAILED');
     return c.json({ok:true,recentAuthUntil:now+RECENT_WINDOW});
   }));
   app.get('/api/admin/devices', endpoint(async c => {

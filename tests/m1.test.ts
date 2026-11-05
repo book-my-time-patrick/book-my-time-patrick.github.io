@@ -50,11 +50,11 @@ async function configured(options: { remember?: boolean; zeroCounter?: boolean }
   h.state.cookie = cookie(result.response);
   return { ...h, authenticator, secret: pending.data.totpSecret, setupResponse: result.response };
 }
-async function login(h: Awaited<ReturnType<typeof configured>>, options: { authenticator?: ReturnType<typeof makeAuthenticator>; time?: number; counter?: number } = {}) {
+async function login(h: Awaited<ReturnType<typeof configured>>, options: { authenticator?: ReturnType<typeof makeAuthenticator>; counter?: number } = {}) {
   const pending = await h.request<LoginFlow>('/api/admin/login/options', 'POST', {});
   assert.equal(pending.response.status, 200);
   const response = (options.authenticator ?? h.authenticator).authenticate(pending.data.options, options.counter === undefined ? {} : { counter: options.counter });
-  const result = await h.request('/api/admin/login/verify', 'POST', { flowId: pending.data.flowId, response, code: totp(h.secret, options.time ?? Date.now()), remember: true, deviceName: '测试手机' });
+  const result = await h.request('/api/admin/login/verify', 'POST', { flowId: pending.data.flowId, response, remember: true, deviceName: '测试手机' });
   return { ...result, pending: pending.data, assertion: response, cookie: result.response.status === 200 ? cookie(result.response) : '' };
 }
 async function sessionCount(h: Awaited<ReturnType<typeof harness>>) { return (await h.DB.prepare('SELECT COUNT(*) AS n FROM sessions').first<{ n: number }>())!.n; }
@@ -121,7 +121,9 @@ test('M1 注册拒绝伪造的 Origin、RP、挑战、缺失 UV 及跨源上下�
     const pending = await h.request<SetupFlow>('/api/admin/setup/options', 'POST', { setupToken: h.setupToken });
     const authenticator = makeAuthenticator(rpID, origin);
     const result = await h.request('/api/admin/setup/verify', 'POST', { flowId: pending.data.flowId, response: authenticator.register(pending.data.options, override), code: totp(pending.data.totpSecret) });
-    assert.equal(result.response.status, 401); assert.equal(result.data.error, 'AUTHENTICATION_FAILED'); assert.equal(result.response.headers.get('set-cookie'), null);
+    assert.equal(result.response.status, 401);
+    assert.equal(result.data.error, 'crossOrigin' in override ? 'PASSKEY_CONTEXT_NOT_SUPPORTED' : 'PASSKEY_VERIFICATION_FAILED');
+    assert.equal(result.response.headers.get('set-cookie'), null);
     assert.equal(await sessionCount(h), 0);
   }
 });
@@ -131,38 +133,38 @@ test('M1 登录拒绝 Origin、RP、挑战、UV、UP、签名及跨源篡改', a
   for (const override of [{ origin: 'https://evil.example' }, { rpID: 'evil.example' }, { challenge: randomBytes(32).toString('base64url') }, { userVerified: false }, { userPresent: false }, { badSignature: true }, { crossOrigin: true, topOrigin: 'https://evil.example' }]) {
     const pending = await h.request<LoginFlow>('/api/admin/login/options', 'POST', {});
     assert.equal(pending.response.status, 200);
-    const result = await h.request('/api/admin/login/verify', 'POST', { flowId: pending.data.flowId, response: h.authenticator.authenticate(pending.data.options, override), code: totp(h.secret) });
+    const result = await h.request('/api/admin/login/verify', 'POST', { flowId: pending.data.flowId, response: h.authenticator.authenticate(pending.data.options, override) });
     assert.equal(result.response.status, 401); assert.equal(result.data.error, 'AUTHENTICATION_FAILED'); assert.equal(result.response.headers.get('set-cookie'), null);
   }
   assert.equal(await sessionCount(h), 1);
 });
 
-test('M1 登录挑战原子单次消费，错误 TOTP、过期挑战均不能换取会话', async () => {
+test('通行密钥登录无需动态码，错误签名、过期和重复挑战不能换取会话', async () => {
   const h = await configured();
   const pending = await h.request<LoginFlow>('/api/admin/login/options', 'POST', {});
-  const assertion = h.authenticator.authenticate(pending.data.options);
-  const valid = totp(h.secret);
-  const validWindow = new Set([-1, 0, 1].map(offset => totp(h.secret, Date.now() + offset * 30_000)));
-  let invalid = '000000';
-  while (validWindow.has(invalid)) invalid = String(Number(invalid) + 1).padStart(6, '0');
-  const request = { flowId: pending.data.flowId, response: assertion, code: invalid };
+  const assertion = h.authenticator.authenticate(pending.data.options, {badSignature:true});
+  const request = { flowId: pending.data.flowId, response: assertion };
   assert.equal((await h.request('/api/admin/login/verify', 'POST', request)).response.status, 401);
-  assert.equal((await h.request('/api/admin/login/verify', 'POST', { ...request, code: valid })).response.status, 401);
+  assert.equal((await h.request('/api/admin/login/verify', 'POST', { ...request, response: h.authenticator.authenticate(pending.data.options) })).response.status, 401);
   const expired = await h.request<LoginFlow>('/api/admin/login/options', 'POST', {});
   await h.DB.prepare('UPDATE auth_challenges SET expires_at=? WHERE id=?').bind(Date.now() - 1, expired.data.flowId).run();
-  assert.equal((await h.request('/api/admin/login/verify', 'POST', { flowId: expired.data.flowId, response: h.authenticator.authenticate(expired.data.options), code: valid })).response.status, 401);
+  assert.equal((await h.request('/api/admin/login/verify', 'POST', { flowId: expired.data.flowId, response: h.authenticator.authenticate(expired.data.options) })).response.status, 401);
   const good = await login(h); assert.equal(good.response.status, 200);
-  const repeated = await h.request('/api/admin/login/verify', 'POST', { flowId: good.pending.flowId, response: good.assertion, code: valid });
+  const repeated = await h.request('/api/admin/login/verify', 'POST', { flowId: good.pending.flowId, response: good.assertion });
   assert.equal(repeated.response.status, 401); assert.equal(await sessionCount(h), 2);
 });
 
-test('M1 同一步 TOTP 并发仅一次成功，计数器为零的通行密钥仍可登录', async () => {
+test('同步通行密钥的零计数器可登录，每个挑战仍只能消费一次', async () => {
   const h = await configured({ zeroCounter: true });
-  const flows = await Promise.all([h.request<LoginFlow>('/api/admin/login/options', 'POST', {}), h.request<LoginFlow>('/api/admin/login/options', 'POST', {})]);
-  const code = totp(h.secret);
-  const results = await Promise.all(flows.map(flow => h.request('/api/admin/login/verify', 'POST', { flowId: flow.data.flowId, response: h.authenticator.authenticate(flow.data.options, { counter: 0 }), code })));
+  const flow = await h.request<LoginFlow>('/api/admin/login/options', 'POST', {});
+  const request = {flowId:flow.data.flowId,response:h.authenticator.authenticate(flow.data.options,{counter:0})};
+  const results = await Promise.all([h.request('/api/admin/login/verify','POST',request), h.request('/api/admin/login/verify','POST',request)]);
   assert.deepEqual(results.map(result => result.response.status).sort(), [200, 401]);
   assert.equal(await sessionCount(h), 2);
+  const flows = await Promise.all([h.request<LoginFlow>('/api/admin/login/options','POST',{}),h.request<LoginFlow>('/api/admin/login/options','POST',{})]);
+  const distinct = await Promise.all(flows.map(item=>h.request('/api/admin/login/verify','POST',{flowId:item.data.flowId,response:h.authenticator.authenticate(item.data.options,{counter:0})})));
+  assert.deepEqual(distinct.map(result=>result.response.status),[200,200]);
+  assert.equal(await sessionCount(h),4);
   assert.equal((await h.DB.prepare('SELECT counter FROM passkeys').first<{ counter: number }>())!.counter, 0);
 });
 
@@ -184,7 +186,7 @@ test('M1 可查看和改名登录设备，撤销与退出立即使指定会话�
   assert.equal((await h.request('/api/admin/me', 'GET', undefined, { cookie: second.cookie })).response.status, 401);
 });
 
-test('M1 敏感操作要求近期两因素验证，重新验证挑战绑定原登录会话', async () => {
+test('敏感操作要求近期通行密钥验证，重新验证挑战绑定原登录会话', async () => {
   const h = await configured();
   const second = await login(h); assert.equal(second.response.status, 200);
   const me = await h.request<{ session: SessionView }>('/api/admin/me');
@@ -192,7 +194,7 @@ test('M1 敏感操作要求近期两因素验证，重新验证挑战绑定原�
   const denied = await h.request('/api/admin/passkeys/options', 'POST', {});
   assert.equal(denied.response.status, 403); assert.equal(denied.data.error, 'REAUTH_REQUIRED');
   const pending = await h.request<LoginFlow>('/api/admin/reauth/options', 'POST', {});
-  const request = { flowId: pending.data.flowId, response: h.authenticator.authenticate(pending.data.options), code: totp(h.secret, Date.now() + 30_000) };
+  const request = { flowId: pending.data.flowId, response: h.authenticator.authenticate(pending.data.options) };
   assert.equal((await h.request('/api/admin/reauth/verify', 'POST', request, { cookie: second.cookie })).response.status, 401);
   assert.equal((await h.request('/api/admin/reauth/verify', 'POST', request)).response.status, 200);
   assert.equal((await h.request('/api/admin/passkeys/options', 'POST', {})).response.status, 200);
@@ -252,4 +254,68 @@ test('M1 无效、过期、撤销邀请统一拒绝，私人接口和跨源后�
   assert.equal((await h.request('/api/admin/devices/revoke-others', 'POST', {}, { origin: null })).response.status, 403);
   assert.equal((await h.request('/api/admin/devices/revoke-others', 'POST', {}, { origin: 'https://evil.example' })).response.status, 403);
   for (const path of ['/api/profile', '/api/availability', '/api/assets/private', '/api/bookings']) assert.equal((await h.request(path)).response.status, 404);
+});
+
+test('首次设置输错动态码可重试同一绑定，五分钟期限不延长', async () => {
+  const h = await harness();
+  const setup = await h.request<SetupFlow>('/api/admin/setup/options', 'POST', {setupToken:h.setupToken});
+  const authenticator = makeAuthenticator(rpID, origin);
+  const response = authenticator.register(setup.data.options);
+  const before = await h.DB.prepare('SELECT expires_at FROM auth_challenges WHERE id=?').bind(setup.data.flowId).first<{expires_at:number}>();
+  const validCodes = [-1,0,1].map(offset=>totp(setup.data.totpSecret,Date.now()+offset*30000));
+  const wrong = Array.from({length:10},(_,index)=>String(100000+index)).find(value=>!validCodes.includes(value))!;
+  const bad = await h.request('/api/admin/setup/verify','POST',{flowId:setup.data.flowId,response,code:wrong,remember:true});
+  assert.equal(bad.response.status,401); assert.equal(bad.data.error,'TOTP_INVALID');
+  assert.equal(bad.response.headers.get('set-cookie'),null); assert.equal(await sessionCount(h),0);
+  const remaining = await h.DB.prepare('SELECT expires_at FROM auth_challenges WHERE id=?').bind(setup.data.flowId).first<{expires_at:number}>();
+  assert.equal(remaining!.expires_at,before!.expires_at);
+  const good = await h.request('/api/admin/setup/verify','POST',{flowId:setup.data.flowId,response,code:totp(setup.data.totpSecret),remember:true});
+  assert.equal(good.response.status,200); assert.equal(await sessionCount(h),1);
+  assert.equal(await h.DB.prepare('SELECT id FROM auth_challenges WHERE id=?').bind(setup.data.flowId).first(),null);
+  assert.equal((await h.request('/api/admin/setup/verify','POST',{flowId:setup.data.flowId,response,code:totp(setup.data.totpSecret)})).response.status,403);
+});
+
+test('首次设置保留错误动态码重试时仍受限速保护', async (t) => {
+  const fixedNow = Date.now();
+  t.mock.method(Date, 'now', () => fixedNow);
+  const h = await harness();
+  const setup = await h.request<SetupFlow>('/api/admin/setup/options','POST',{setupToken:h.setupToken});
+  const authenticator = makeAuthenticator(rpID,origin),response=authenticator.register(setup.data.options);
+  for(let attempt=0;attempt<29;attempt++) {
+    const valid = [-1,0,1].map(offset=>totp(setup.data.totpSecret,Date.now()+offset*30000));
+    const wrong = Array.from({length:10},(_,index)=>String(200000+index)).find(value=>!valid.includes(value))!;
+    assert.equal((await h.request('/api/admin/setup/verify','POST',{flowId:setup.data.flowId,response,code:wrong})).response.status,401);
+  }
+  assert.equal((await h.request('/api/admin/setup/verify','POST',{flowId:setup.data.flowId,response,code:'000000'})).response.status,429);
+  assert.equal(await sessionCount(h),0);
+});
+
+test('Apple 类同步凭据与零计数器可完成首次绑定，非法备份标志仍拒绝', async () => {
+  for(const valid of [true,false]) {
+    const h = await harness();
+    const setup = await h.request<SetupFlow>('/api/admin/setup/options','POST',{setupToken:h.setupToken});
+    const authenticator = makeAuthenticator(rpID,origin);
+    const response = authenticator.register(setup.data.options,{backupEligible:valid,backedUp:true,counter:0,transports:['internal','hybrid']});
+    const result=await h.request('/api/admin/setup/verify','POST',{flowId:setup.data.flowId,response,code:totp(setup.data.totpSecret),remember:true});
+    assert.equal(result.response.status,valid?200:401);
+    if(valid) {
+      const row=await h.DB.prepare('SELECT device_type,backed_up,counter,transports FROM passkeys').first<{device_type:string;backed_up:number;counter:number;transports:string}>();
+      assert.equal(row!.device_type,'multiDevice');assert.equal(row!.backed_up,1);assert.equal(row!.counter,0);assert.deepEqual(JSON.parse(row!.transports),['internal','hybrid']);
+    } else assert.equal(result.data.error,'PASSKEY_VERIFICATION_FAILED');
+  }
+});
+
+test('有效记住会话九十天后仍可直接访问，主动退出后必须重新用通行密钥登录', async (t) => {
+  const h = await configured();
+  const remembered = h.state.cookie;
+  const later = Date.now() + 90 * 86400000;
+  t.mock.method(Date,'now',()=>later);
+  assert.equal((await h.request('/api/admin/me','GET',undefined,{cookie:remembered})).response.status,200);
+  const logout = await h.request('/api/admin/logout','POST',{}, {cookie:remembered});
+  assert.equal(logout.response.status,200);
+  assert.equal((await h.request('/api/admin/me','GET',undefined,{cookie:remembered})).response.status,401);
+  const signedIn = await login(h);
+  assert.equal(signedIn.response.status,200);
+  assert.ok(signedIn.cookie && signedIn.cookie !== remembered);
+  assert.equal((await h.request('/api/admin/me','GET',undefined,{cookie:signedIn.cookie})).response.status,200);
 });
