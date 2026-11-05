@@ -1,6 +1,6 @@
 # 受邀预约 · M0
 
-邀请制预约站的最小可运行版本。前端使用 GitHub Pages，API 首选 Cloudflare Workers。普通 Node 服务器可以同时提供前端和 API，作为同域备用部署。
+邀请制预约站的最小可运行版本。主站已部署到 `https://book-my-time-patrick.cn/`，前端由 Cloudflare 静态资源托管，同源 `/api` 由 Workers 提供。GitHub Pages 保留为备用入口，普通 Node 服务器保留为另一种同域部署方式。
 
 ## 当前进度
 
@@ -10,19 +10,19 @@
 | 独立 API、精确跨域允许、默认关闭业务接口 | 已实现 |
 | 连通性自检、浏览器内记录、CSV 导出 | 已实现 |
 | 同一套 API 在 Workers 与 Node 中运行 | 已实现 |
-| GitHub Pages 工作流、Workers 配置生成、同域 Docker 配置 | 已提供 |
+| GitHub Pages 工作流、Workers 配置生成、同域 Docker 配置 | 已提供；Cloudflare 主站静态资源已部署并通过技术上线检查 |
 | 登录可行性 | Argon2id 的两种实现线上反复触发 1102。通行密钥验签、TOTP、组合核心验证各 12/12 通过，完整登录流程待 M1 |
-| GitHub 仓库、Pages 与 Cloudflare 授权 | 已完成，中性首页与前端自检已上线 |
-| API 自有域名 | 已在阿里云注册 `book-my-time-patrick.cn`，Cloudflare 已激活，`api.book-my-time-patrick.cn` 已绑定 Worker |
-| 正式 API 与前端联调 | 已部署并通过 HTTPS、CORS、安全头与静态产物检查；真实设备网络覆盖仍待补齐 |
-| 大陆三网访问 | 已开始用户实测；其余覆盖与 CSV 归档待补，具体网络记录仅保存在本机 |
+| GitHub 仓库、Pages 与 Cloudflare 授权 | 已完成，GitHub 源码与 Actions 发布保留，Pages 用作备用 |
+| 主站与 API 自有域名 | `book-my-time-patrick.cn` 已在阿里云注册，DNS 已交给 Cloudflare；主站与同源 API 已上线，旧 API 子域名保留兼容 |
+| 正式 API 与前端联调 | 新主站 15 项 HTTP 检查通过，旧 API 与 Pages 备用入口兼容检查通过 |
+| 大陆三网访问 | 收到部分网络可打开、部分网络失败反馈，双项结果及覆盖待补；旧 Pages 的测试结果不能替代新域名验收，具体网络记录仅保存在本机 |
 | 登录与有效邀请 | M1 实现，当前尚未开放 |
 | 邮箱与申请邮件 | M2 实现 |
 | iCloud / Outlook 忙闲读取 | M3 实现，独立只读授权途径待核实 |
 
 M0 所有邀请入口显示统一不可用页。根路径不会请求个人资料或日历。公开的 `#/check` 页面只测试固定连通性信号，不展示个人内容。API 健康检查通过仅说明 API 可用，不代表日历已经同步。
 
-分享入口为 [受邀预约](https://book-my-time-patrick.github.io/)，网络测试使用 [可达性自检](https://book-my-time-patrick.github.io/#/check)。最新部署与验证结果见 [M0 线上验证记录](docs/M0-线上验证记录.md)。
+主分享入口为 [受邀预约](https://book-my-time-patrick.cn/)，网络测试使用 [可达性自检](https://book-my-time-patrick.cn/#/check)，均已部署。备用入口为 [GitHub Pages](https://book-my-time-patrick.github.io/)。最新部署与验证结果见 [M0 线上验证记录](docs/M0-线上验证记录.md)。M0 尚未完成全部验收，也尚未提供完整预约或管理后台。
 
 ## 本机演示
 
@@ -44,21 +44,23 @@ npm run dev
 
 前端全部字体、脚本、图标随站点提供。没有第三方字体、埋点、验证码或公共资源 CDN。运行时仅请求当前前端和配置好的 API。
 
-## GitHub Pages + Workers 部署
+## Cloudflare 主站部署
 
-GitHub Pages 只托管静态资源，邀请令牌放在 URL 的 `#` 后。API 校验邀请后才会返回个人数据。CORS 只限制浏览器跨域，实际门禁由 M1 的服务端鉴权负责。当前所有业务接口统一返回 404。
+Cloudflare 直接托管主站 HTML、脚本、样式和图标，访客打开主站时从 Cloudflare 获取这些资源。静态资源命中由资源服务直接返回，只有 `/api` 和 `/api/*` 路径优先执行 Worker，减少静态页面访问的 Worker CPU 消耗。邀请令牌放在 URL 的 `#` 后，M1 将由 API 校验邀请再返回个人数据。当前所有业务接口统一返回 404。
 
 ### 1. 准备账号和域名
 
-需要一个你可管理的 GitHub 仓库、Cloudflare 账号，以及一个 DNS 已交给 Cloudflare 管理的自有域名。Pages 入口可以保持 `你的账号.github.io`，自有域名只给 API 使用。
+需要一个你可管理的 GitHub 仓库、Cloudflare 账号，以及一个 DNS 已交给 Cloudflare 管理的自有域名。本项目按用户选择暂不备案，先使用 `.cn` 域名与 Cloudflare 实测大陆可达性。
 
-站点仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，组织与仓库均已创建，Pages 中性首页已经发布。分享入口为 `https://book-my-time-patrick.github.io/`，邀请与检查的 hash 路由接在这个地址后。API 的 CORS 前端源填写 `https://book-my-time-patrick.github.io`。
+站点仓库为 `https://github.com/book-my-time-patrick/book-my-time-patrick.github.io`，组织与仓库均已创建。主分享入口为 `https://book-my-time-patrick.cn/`，邀请与检查的 hash 路由接在该地址后。GitHub 继续保管源码，原 Actions 工作流继续发布备用 Pages 入口 `https://book-my-time-patrick.github.io/`。
 
-自有域名 `book-my-time-patrick.cn` 已在阿里云注册，权威 DNS 已交给 Cloudflare，域名状态为 Active。正式 API 为 `https://api.book-my-time-patrick.cn/api`，Pages 已使用该地址重新构建发布。HTTPS、精确前端源的 CORS、跨域预检和业务接口关闭均已通过 HTTP 检查。
+自有域名 `book-my-time-patrick.cn` 已在阿里云注册，权威 DNS 已交给 Cloudflare，域名状态为 Active。主站调用 `https://book-my-time-patrick.cn/api`，旧地址 `https://api.book-my-time-patrick.cn/api` 保留供 Pages 和已有链接兼容。配置中的额外 CORS 前端源仍填 `https://book-my-time-patrick.github.io`，主站通过同源访问 API。
 
 GitHub 免费计划下通常使用公开代码仓库。发布前确认仓库中只有代码，`.env`、凭据、实际邀请和日历文件均不能提交。GitHub Pages 仓库是否私有与网站的邀请门禁是两件事。
 
-年度预算上限为 120 元。Workers、D1 和外部发信通道的免费额度需要分别核验。域名按续费价计算，不按首年促销价推算。免费套餐额度耗尽时应停止服务并提示，不能把失败结果当作空闲。
+年度预算上限为 120 元。本次迁移沿用 Cloudflare 免费套餐，没有升级收费方案。Workers、D1 和外部发信通道的免费额度需要分别核验。域名按续费价计算，不按首年促销价推算。免费套餐额度耗尽时应停止服务并提示，不能把失败结果当作空闲。
+
+全球免费版不保证大陆各网络稳定。Cloudflare 官方说明，境外服务器访问大陆存在延迟与可靠性问题；[Cloudflare China Network](https://developers.cloudflare.com/china-network/) 属于 Enterprise 的单独订阅，并要求有效 ICP 备案或许可。本项目当前未使用该产品，实际可达性以新域名的持续网络测试为准。
 
 ### 2. 官方登录
 
@@ -71,26 +73,30 @@ npx wrangler whoami
 
 不要将 API token、订阅链接或邮箱密码粘贴到聊天或源文件中。后续服务端密钥通过 `wrangler secret put` 设置。前端构建变量全部公开，不能用于存密钥。
 
-### 3. 生成并部署 API 配置
+### 3. 生成并部署主站与 API
 
-以下命令使用本项目的分享地址与已选定的 API 域名。第一个参数只填写前端的源，即协议加域名，不含仓库路径。即使前端在 `/仓库名/` 下，CORS 的源仍是 `https://你的账号.github.io`。
+三个参数依次为备用 Pages 的允许源、旧 API 子域名和主站地址。都填写协议加域名，不含路径、查询参数或 hash。
 
 ```bash
-npm run configure:worker -- https://book-my-time-patrick.github.io https://api.book-my-time-patrick.cn
-npm run deploy:api
+npm run configure:worker -- https://book-my-time-patrick.github.io https://api.book-my-time-patrick.cn https://book-my-time-patrick.cn
+npm run deploy:site
 ```
 
-配置保存到忽略提交的 `.local/wrangler.production.jsonc`。默认关闭 `workers.dev` 和预览地址，只绑定指定自有域名。当前不创建数据库、不接入个人日历。D1 在 M1 需要真实持久化时再配置。
+配置保存到忽略提交的 `.local/wrangler.production.jsonc`。`deploy:site` 先运行 `build:site`，将强制使用同源 `/api` 的前端构建到独立目录 `.local/site-dist/`，再发布主站资源与 API。该构建模式覆盖本机 `VITE_API_BASE_URL`，不会混入 Pages 的跨域 API 地址。后续主站前端或 API 更新均使用 `npm run deploy:site`。GitHub Actions 推送更新的是备用 Pages，主站还需执行此命令。
 
-打开部署后的 `https://api.book-my-time-patrick.cn/api/health`。成功时应返回以下固定内容。
+默认关闭 `workers.dev` 和预览地址，绑定主站与旧 API 子域名。当前不创建数据库、不接入个人日历。D1 在 M1 需要真实持久化时再配置。
+
+配置命令只传两个参数时，会重新生成原来的 API-only 配置，移除主站域名和静态资源配置。它仅用于有意恢复旧部署方式，日常更新主站时务必保留第三个参数。`npm run deploy:api` 不重新构建主站资源，日常使用上面的 `deploy:site`。
+
+打开部署后的 `https://book-my-time-patrick.cn/api/health`。成功时应返回以下固定内容，旧 API 子域名也应返回同样的固定信号。
 
 ```json
 {"ok":true,"service":"invite-api"}
 ```
 
-API 与前端资源均设置禁止索引。Workers 关闭请求观测日志，业务代码没有请求记录器。域名服务商和托管平台可能保留各自的基础设施日志，本站应用不写 IP 明细、Authorization 或邀请令牌日志。
+API 与前端资源均设置禁止索引。部署配置显式设置 `observability.enabled=false`，管理 API 本次未返回该字段；已确认 Logpush 关闭，业务代码没有请求记录器。域名服务商和托管平台可能保留各自的基础设施日志，本站应用不写 IP 明细、Authorization 或邀请令牌日志。
 
-### 4. 部署 Pages
+### 4. 更新备用 GitHub Pages
 
 1. 将代码提交到 GitHub 仓库的 `main` 分支。
 2. 进入仓库 Settings → Pages，将 Source 选为 GitHub Actions。
@@ -104,13 +110,13 @@ API 与前端资源均设置禁止索引。Workers 关闭请求观测日志，�
 
 Pages 使用 `npm run build:pages` 构建；普通 `npm run build` 仍保留 `/api` 同源默认值，供下文的香港服务器备用方案使用。新建组织站仓库后应先把 Pages 发布源设为 GitHub Actions，避免 GitHub 默认将仓库说明文档生成网站。
 
-GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件或 `.local/`。管理员通行密钥登录界面在 M1 放到 API 域名下，保持登录会话同源。
+GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件或 `.local/`。Cloudflare 主站使用独立的 `.local/site-dist/`，两个产物互不覆盖。M1 管理后台与登录会话计划使用 `book-my-time-patrick.cn` 下的同源 API。当前尚未创建真实管理员凭据或会话，本次入口迁移没有已有凭据需要迁移。
 
 ## 可达性自检
 
 请在大陆实际网络上操作，香港网络或本机 localhost 结果不计入大陆验收。
 
-1. 暂停设备的代理或 VPN，打开真实 Pages 首页。
+1. 暂停设备的代理或 VPN，打开主站 `https://book-my-time-patrick.cn/`。
 2. 打开 `#/check`，手动选择运营商和网络，点击检测。
 3. 前端检测会重新获取 `connectivity.json`，API 检测会请求 `/api/health`，均禁用 HTTP 缓存，最长等待 8 秒。
 4. 分别覆盖电信、联通、移动的 4G/5G 和 Wi-Fi，共六种组合。无法覆盖的项目保留为未测，不推断通过。
@@ -118,7 +124,7 @@ GitHub Actions 工作流只部署 `dist/`，不会上传源文件、需求文件
 
 请在测试前准确选择网络。页面不会自动确认代理是否关闭，也不会自动识别运营商。所有结果只保存在本机浏览器，不上传测试记录。每条记录包含北京时间、运营商、网络类型和前端/API 的结果及耗时。没有 IP、位置、User-Agent 明细或邀请令牌。
 
-只有前端和 API 都通过，才算该次网络测试通过。首页能打开但 API 失败时，预约功能仍不可用。
+只有前端和 API 都通过，才算该次网络测试通过。首页能打开但 API 失败时，预约功能仍不可用。新主站的测试需重新执行并记录访问域名，原 Pages 入口的用户反馈仅作为历史记录，不能计入新主站的验收。
 
 ## 登录可行性探针
 
@@ -184,7 +190,7 @@ M1 包含「登录设备」管理页。列表按浏览器登录会话展示设�
 
 私人来源是 iCloud 中勾选的个人日历，工作 Outlook 当前通过订阅在 Apple 日历可见。两者均参与忙闲计算。多设备同步成功与允许本站读取忙闲需要分别验证。
 
-这些检查用于提前确认 M3 接入方案，可使用虚构日程。M0 的验收范围是项目骨架、真实 Pages 与 API 联通、中性入口、可达性自检和同域切换能力；真实日历读取在 M3 验收，邮箱管理与申请邮件在 M2 验收。
+这些检查用于提前确认 M3 接入方案，可使用虚构日程。M0 的当前验收范围是项目骨架、Cloudflare 主站与同源 API 联通、中性入口、可达性自检，以及 Pages 和同域服务器备用部署能力；真实日历读取在 M3 验收，邮箱管理与申请邮件在 M2 验收。
 
 - 核实单位账户是 M365 国际版、世纪互联还是本地 Exchange，并在组织允许的范围内进行独立只读授权。
 - 验证 iCloud 能否只返回必要的忙闲字段。不要默认拉取完整事件后再删除标题。
