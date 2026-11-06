@@ -11,7 +11,7 @@ const databasePath = process.env.DATABASE_PATH || './.local/app.sqlite';
 await mkdir(dirname(databasePath), { recursive: true });
 const DB = openSqlite(databasePath);
 for (const file of (await readdir('migrations')).filter(name => name.endsWith('.sql')).sort()) {
-  await DB.exec(await readFile(`migrations/${file}`, 'utf8'));
+  DB.migrate(file, await readFile(`migrations/${file}`, 'utf8'));
 }
 
 const port = Number(process.env.PORT || 3000);

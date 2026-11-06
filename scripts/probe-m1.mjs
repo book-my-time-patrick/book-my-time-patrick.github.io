@@ -8,9 +8,10 @@ import { makeAuthenticator, totp } from '../tests/webauthn-fixture.ts';
 
 // Isolated synthetic owner only. Never use the production Worker or database.
 const client=createCloudflareClient();
+const passwordOnly=process.argv.includes('--password-only');
 const nonce=randomBytes(6).toString('hex'),name=`invited-m1-probe-${nonce}`;
 const configPath=`.local/${name}.jsonc`;
-const evidence={name,startedAt:new Date().toISOString(),syntheticOnly:true,realDeviceVerified:false,exactCloudCpuVerified:false,checks:[],cleanup:{}};
+const evidence={name,scope:passwordOnly?'password':'full',startedAt:new Date().toISOString(),syntheticOnly:true,realDeviceVerified:false,exactCloudCpuVerified:false,checks:[],cleanup:{}};
 let accountId,databaseId,zoneId,workerAttempted=false;
 let phase='account';
 function wrangler(args) {
@@ -62,32 +63,70 @@ try {
  assert.equal((await call('/api/admin/status')).data.configured,true);
  await call('/api/admin/setup/options','POST',{setupToken},403);
  await call('/api/admin/me');
- const request={label:'Synthetic private note',expiresAt:new Date(Date.now()+86400000).toISOString(),permissions:{modules:['calendar'],modes:['request']}};
- const issued=(await call('/api/admin/invites','POST',request,201)).data;
- const visited=(await call('/api/invite','GET',undefined,200,{Authorization:`Bearer ${issued.token}`})).data;
- assert.deepEqual(visited.permissions,request.permissions); assert.equal(visited.preview,false); assert.ok(!JSON.stringify(visited).includes(request.label));
- const preview=(await call('/api/admin/preview','POST',{inviteId:issued.invite.id},201)).data;
- const previewToken=new URL(preview.url).hash.slice(4);
- assert.equal((await call('/api/invite','GET',undefined,200,{Authorization:`Bearer ${previewToken}`})).data.preview,true);
- assert.equal((await call('/api/admin/invites')).data.invites[0].openCount,1);
- await call(`/api/admin/invites/${issued.invite.id}`,'DELETE',{});
- await call('/api/invite','GET',undefined,404,{Authorization:`Bearer ${issued.token}`});
+ if (!passwordOnly) {
+  const request={label:'Synthetic private note',expiresAt:new Date(Date.now()+86400000).toISOString(),permissions:{modules:['calendar'],modes:['request']}};
+  const issued=(await call('/api/admin/invites','POST',request,201)).data;
+  const visited=(await call('/api/invite','GET',undefined,200,{Authorization:`Bearer ${issued.token}`})).data;
+  assert.deepEqual(visited.permissions,request.permissions); assert.equal(visited.preview,false); assert.ok(!JSON.stringify(visited).includes(request.label));
+  const preview=(await call('/api/admin/preview','POST',{inviteId:issued.invite.id},201)).data;
+  const previewToken=new URL(preview.url).hash.slice(4);
+  assert.equal((await call('/api/invite','GET',undefined,200,{Authorization:`Bearer ${previewToken}`})).data.preview,true);
+  assert.equal((await call('/api/admin/invites')).data.invites[0].openCount,1);
+  await call(`/api/admin/invites/${issued.invite.id}`,'DELETE',{});
+  await call('/api/invite','GET',undefined,404,{Authorization:`Bearer ${issued.token}`});
+ }
  const flow=(await call('/api/admin/login/options','POST',{})).data;
  const loginBody={flowId:flow.flowId,response:authenticator.authenticate(flow.options),deviceName:'Synthetic mobile',remember:true};
  const login=await call('/api/admin/login/verify','POST',loginBody);
  cookie=login.response.headers.get('set-cookie')?.split(';')[0]??''; assert.ok(cookie&&cookie!==firstCookie);
- await call('/api/admin/login/verify','POST',loginBody,401);
- const reauth=(await call('/api/admin/reauth/options','POST',{})).data;
- await call('/api/admin/reauth/verify','POST',{flowId:reauth.flowId,response:authenticator.authenticate(reauth.options)});
- await call('/api/admin/devices');
- const added=makeAuthenticator(new URL(site).hostname,site);
- const register=(await call('/api/admin/passkeys/options','POST',{})).data;
- await call('/api/admin/passkeys/verify','POST',{flowId:register.flowId,response:added.register(register.options),deviceName:'Synthetic second passkey'});
- assert.equal((await call('/api/admin/passkeys')).data.passkeys.length,2);
- await call('/api/admin/devices/revoke-others','POST',{});
- await call('/api/admin/me','GET',undefined,401,{Cookie:firstCookie});
- const bad=(await call('/api/admin/login/options','POST',{})).data;
- await call('/api/admin/login/verify','POST',{flowId:bad.flowId,response:authenticator.authenticate(bad.options,{badSignature:true})},401);
+ if (!passwordOnly) {
+  await call('/api/admin/login/verify','POST',loginBody,401);
+  const reauth=(await call('/api/admin/reauth/options','POST',{})).data;
+  await call('/api/admin/reauth/verify','POST',{flowId:reauth.flowId,response:authenticator.authenticate(reauth.options)});
+  await call('/api/admin/devices');
+  const added=makeAuthenticator(new URL(site).hostname,site);
+  const register=(await call('/api/admin/passkeys/options','POST',{})).data;
+  await call('/api/admin/passkeys/verify','POST',{flowId:register.flowId,response:added.register(register.options),deviceName:'Synthetic second passkey'});
+  assert.equal((await call('/api/admin/passkeys')).data.passkeys.length,2);
+ }
+ const passkeyCookie=cookie;
+ const passwordRoute='/api/admin/password';
+ const passwordLogin='/api/admin/login/password';
+ assert.equal((await call('/api/admin/status')).data.passwordEnabled,false);
+ await call(passwordRoute,'POST',{revision:null},401,{Cookie:''});
+ const initialPassword=(await call(passwordRoute,'POST',{revision:null})).data;
+ assert.match(initialPassword.password,/^[A-Za-z0-9_-]{32}$/);
+ assert.deepEqual((await call(passwordRoute)).data,{enabled:true,revision:initialPassword.revision,updatedAt:initialPassword.updatedAt});
+ assert.equal((await call('/api/admin/status')).data.passwordEnabled,true);
+ await call(passwordLogin,'POST',{password:randomBytes(24).toString('base64url')},401,{Cookie:''});
+ const passwordSession=await call(passwordLogin,'POST',{password:initialPassword.password,remember:true},200,{Cookie:''});
+ const passwordCookie=passwordSession.response.headers.get('set-cookie')?.split(';')[0]??'';
+ assert.match(passwordCookie,/^__Host-admin_session=/);
+ cookie=passwordCookie;
+ assert.equal((await call('/api/admin/me')).data.session.method,'password');
+ assert.ok((await call('/api/admin/devices')).data.devices.some(device=>device.current&&device.method==='password'));
+ assert.equal((await call('/api/admin/passkeys/options','POST',{},403)).data.error,'REAUTH_REQUIRED');
+ assert.equal((await call(passwordRoute,'DELETE',{revision:initialPassword.revision},403)).data.error,'PASSKEY_LOGIN_REQUIRED');
+ const passwordReauth=(await call('/api/admin/reauth/options','POST',{})).data;
+ await call('/api/admin/reauth/verify','POST',{flowId:passwordReauth.flowId,response:authenticator.authenticate(passwordReauth.options)});
+ cookie=passkeyCookie;
+ const rotatedPassword=(await call(passwordRoute,'POST',{revision:initialPassword.revision})).data;
+ await call(passwordRoute,'DELETE',{revision:initialPassword.revision},409);
+ await call('/api/admin/me','GET',undefined,401,{Cookie:passwordCookie});
+ await call(passwordLogin,'POST',{password:initialPassword.password},401,{Cookie:''});
+ const rotatedSession=await call(passwordLogin,'POST',{password:rotatedPassword.password},200,{Cookie:''});
+ const rotatedCookie=rotatedSession.response.headers.get('set-cookie')?.split(';')[0]??'';
+ assert.match(rotatedCookie,/^__Host-admin_session=/);
+ await call(passwordRoute,'DELETE',{revision:rotatedPassword.revision});
+ await call('/api/admin/me','GET',undefined,401,{Cookie:rotatedCookie});
+ await call(passwordLogin,'POST',{password:rotatedPassword.password},401,{Cookie:''});
+ assert.equal((await call('/api/admin/me')).data.session.method,'passkey');
+ if (!passwordOnly) {
+  await call('/api/admin/devices/revoke-others','POST',{});
+  await call('/api/admin/me','GET',undefined,401,{Cookie:firstCookie});
+  const bad=(await call('/api/admin/login/options','POST',{})).data;
+  await call('/api/admin/login/verify','POST',{flowId:bad.flowId,response:authenticator.authenticate(bad.options,{badSignature:true})},401);
+ }
  await call('/api/admin/logout','POST',{});
  await call('/api/admin/me','GET',undefined,401);
  evidence.passed=true;

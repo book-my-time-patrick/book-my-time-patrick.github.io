@@ -7,10 +7,13 @@ type Time = string | number;
 type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
 type AuthenticationOptions = Parameters<typeof startAuthentication>[0]['optionsJSON'];
 type RegistrationResult = Awaited<ReturnType<typeof startRegistration>>;
+type LoginMethod = 'passkey' | 'password';
 interface DeviceChoice { deviceName: string; remember: boolean }
 interface Permissions { modules: string[]; modes: string[] }
-interface Session { id: string; label: string; os: string; browser: string; createdAt: Time; lastSeenAt: Time; expiresAt: Time; current: boolean; recentAuthUntil?: Time }
+interface Session { id: string; label: string; os: string; browser: string; method: LoginMethod; createdAt: Time; lastSeenAt: Time; expiresAt: Time; current: boolean; recentAuthUntil?: Time }
 interface Me { id: string; name: string; session: Session }
+interface PasswordSettings { enabled: boolean; revision: string | null; updatedAt: number | null }
+interface GeneratedPassword { password: string; revision: string; updatedAt: number }
 interface Invite { id: string; label: string; createdAt: Time; expiresAt: Time; revokedAt: Time | null; lastOpenedAt: Time | null; openCount: number; permissions: Permissions }
 interface Passkey { id: string; name: string; createdAt: Time; lastUsedAt: Time | null; backedUp: boolean; deviceType: string }
 interface Options<T> { flowId: string; options: T }
@@ -23,7 +26,7 @@ function diagnosticFor(error: unknown): string {
   return JSON.stringify(error instanceof ApiError ? { error: error.code, httpStatus: error.status, phase: error.phase, ...(error.ray ? { cfRay: error.ray } : {}) } : { error: 'CLIENT_AUTHENTICATION_ERROR', phase: 'SYSTEM_AUTH' });
 }
 function requestPhase(path: string): string {
-  const phases: Record<string, string> = { '/admin/setup/options': 'SETUP_START', '/admin/setup/verify': 'SETUP_VERIFY', '/admin/login/options': 'LOGIN_START', '/admin/login/verify': 'LOGIN_VERIFY', '/admin/reauth/options': 'REAUTH_START', '/admin/reauth/verify': 'REAUTH_VERIFY', '/admin/me': 'SESSION_CHECK', '/admin/status': 'ADMIN_STATUS' };
+  const phases: Record<string, string> = { '/admin/setup/options': 'SETUP_START', '/admin/setup/verify': 'SETUP_VERIFY', '/admin/login/options': 'LOGIN_START', '/admin/login/verify': 'LOGIN_VERIFY', '/admin/login/password': 'PASSWORD_LOGIN', '/admin/password': 'PASSWORD_SETTINGS', '/admin/reauth/options': 'REAUTH_START', '/admin/reauth/verify': 'REAUTH_VERIFY', '/admin/me': 'SESSION_CHECK', '/admin/status': 'ADMIN_STATUS' };
   return phases[path] ?? 'ADMIN_API';
 }
 
@@ -39,8 +42,11 @@ function messageFor(error: unknown): string {
     if (error.status === 429) return '操作较频繁，请稍等几分钟后再试。';
     if (error.code === 'SETUP_UNAVAILABLE') return '初始化码无效、已过期或设置已经完成，请使用最新提供的专属初始化码。';
     if (error.code === 'REAUTH_REQUIRED') return '请再次验证身份后重试刚才的操作。';
+    if (error.code === 'PASSKEY_LOGIN_REQUIRED') return '请退出当前登录，然后使用通行密钥登录以管理密码。';
+    if (error.code === 'PASSWORD_CHANGED') return '密码状态已更新。请重新打开「登录密码」，查看状态后再操作。';
     if (error.code === 'LAST_PASSKEY' || error.code === 'LAST_CREDENTIAL') return '至少需要保留一把通行密钥，请先添加另一把。';
     if (error.status === 503) return '管理服务暂时无法使用，请稍后重试。';
+    if (error.status === 401 && error.phase === 'PASSWORD_LOGIN') return '密码验证未通过。请确认密码，或改用通行密钥。';
     if (error.status === 401) return '验证未通过或登录已失效。请选择此前成功绑定的通行密钥，重新进行系统验证。';
     if (error.status === 404) return '这条记录已不可用，请刷新列表。';
     if (error.status === 409) return '状态已发生变化，请刷新后重试。';
@@ -75,7 +81,8 @@ export function renderAdmin(root: HTMLElement): () => void {
   let revision = 0;
   let identityVersion = 0;
   let me: Me | null = null;
-  let tab: 'invites' | 'devices' | 'passkeys' = 'invites';
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' = 'invites';
+  let passwordEnabled = false;
   let setupToken = /^#\/admin\/setup\/([A-Za-z0-9_-]{32,256})$/.exec(location.hash)?.[1] ?? '';
   let setup: Setup | null = null;
   let currentDialog: HTMLDialogElement | null = null;
@@ -104,7 +111,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   function shell(content: string, signedIn = false): number {
     revision += 1;
     root.innerHTML = `<main class="admin-page"><header class="admin-header"><a class="admin-wordmark" href="#/admin"><i aria-hidden="true">↗</i>受邀预约 <span class="stage">管理后台</span></a>${signedIn ? `<div class="admin-header-actions"><span class="admin-current-name">${e(me?.session.label || '当前设备')}</span><button class="text-button" type="button" id="admin-logout">退出登录</button></div>` : '<a class="text-button" href="#/">返回首页</a>'}</header>${content}<footer class="admin-footer">仅供管理员使用。邀请与个人资料由服务端验证访问权限。</footer></main>`;
-    root.querySelector('#admin-logout')?.addEventListener('click', () => void action(async () => { await request('/admin/logout', {}); clearPrivate(); showLogin('已退出这台设备。'); }));
+    root.querySelector('#admin-logout')?.addEventListener('click', () => void action(async () => { await request('/admin/logout', {}); clearPrivate(); await initialize('已退出这台设备。'); }));
     return revision;
   }
   function clearPrivate() {
@@ -134,7 +141,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       const raw = await response.text();
       try { data = JSON.parse(raw); }
       catch {
-        if (response.status === 401 && me && !path.endsWith('/verify')) { clearPrivate(); showLogin('登录已失效，请重新验证。'); }
+        if (response.status === 401 && me && !path.endsWith('/verify')) { clearPrivate(); void initialize('登录已失效，请重新验证。'); }
         throw new ApiError(response.status, /(?:error(?:\s+code)?\s*:?\s*1102\b|cf-error-code[^>]*>\s*1102\b)/i.test(raw) ? 'WORKER_CPU_LIMIT' : 'INVALID_RESPONSE', phase, ray);
       }
     } catch (error) {
@@ -147,7 +154,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       const returned = data && typeof data === 'object' && 'error' in data ? String(data.error) : '';
       const code = /^[A-Z][A-Z0-9_]{1,63}$/.test(returned) ? returned : 'REQUEST_FAILED';
       const proofFailure = path.endsWith('/verify') && ['AUTHENTICATION_FAILED', 'TOTP_INVALID', 'PASSKEY_VERIFICATION_FAILED', 'PASSKEY_CONTEXT_NOT_SUPPORTED', 'SETUP_FLOW_EXPIRED'].includes(code);
-      if (response.status === 401 && me && !proofFailure) { clearPrivate(); showLogin('登录已失效，请重新验证。'); }
+      if (response.status === 401 && me && !proofFailure) { clearPrivate(); void initialize('登录已失效，请重新验证。'); }
       throw new ApiError(response.status, code, phase, ray);
     }
     return data as T;
@@ -173,53 +180,93 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     } finally { if (button?.isConnected) button.disabled = false; }
   }
-  function showLogin(message = '', configured = true, device: DeviceChoice = { deviceName: '这台设备', remember: true }) {
+  function showLogin(message = '', device: DeviceChoice = { deviceName: '这台设备', remember: true }, method: LoginMethod = 'passkey') {
     me = null; setup = null; pendingSetup = null; recentLinks.clear();
-    const version = shell(`<section class="admin-auth"><p class="eyebrow">YOUR PRIVATE DESK</p><h1>欢迎回来。</h1><p class="admin-copy">使用已绑定的通行密钥登录，无需输入账号、密码或六位动态码。</p><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><section class="admin-card">${configured ? `<form id="login-form"><label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="${e(device.deviceName)}" autocomplete="off" required></label><label class="admin-checkbox"><input type="checkbox" name="remember" ${device.remember ? 'checked' : ''}>记住这台设备，最长 6 个月</label><button class="primary" type="submit">使用通行密钥登录 <span aria-hidden="true">↗</span></button></form><p class="admin-help">系统会提供 Touch ID、Face ID、Windows Hello 或设备解锁等可用方式。如有多把同名通行密钥，请选择此前成功绑定的一把；可以先在 Safari 保持已登录。关闭页面后，有效会话内可以直接返回；点击退出会结束当前登录。</p>` : '<h2>后台尚未初始化</h2><p class="admin-copy">请使用单独提供的初始化码，绑定第一把通行密钥与身份验证器。后台网址本身不授予注册权限。</p>'}</section></section>`);
+    const usePassword = method === 'password' && passwordEnabled;
+    const label = usePassword ? '使用密码登录' : '使用通行密钥登录';
+    const intro = usePassword ? '输入你在后台生成并保存的登录密码。' : '使用已绑定的通行密钥，由系统验证身份。';
+    const passwordField = '<label class="admin-field">登录密码<input name="password" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" maxlength="64" required></label>';
+    const switchLabel = usePassword ? '改用通行密钥' : '使用密码登录';
+    const passkeyHelp = '系统会提供 Touch ID、Face ID、Windows Hello 或设备解锁等方式。如有多把同名通行密钥，请选择此前成功绑定的一把。';
+    const version = shell(`
+      <section class="admin-auth">
+        <p class="eyebrow">YOUR PRIVATE DESK</p>
+        <h1>欢迎回来。</h1>
+        <p class="admin-copy">${intro}</p>
+        <div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div>
+        <section class="admin-card">
+          <form id="login-form" method="post">
+            ${usePassword ? passwordField : ''}
+            <label class="admin-field">这台设备的名称<input name="deviceName" maxlength="80" value="${e(device.deviceName)}" autocomplete="off" required></label>
+            <label class="admin-checkbox"><input type="checkbox" name="remember" ${device.remember ? 'checked' : ''}>记住这台设备，最长 6 个月</label>
+            <button class="primary" type="submit">${label} <span aria-hidden="true">↗</span></button>
+            ${passwordEnabled ? `<button class="text-button admin-login-switch" type="button" id="login-method-switch">${switchLabel}</button>` : ''}
+          </form>
+          <p class="admin-help">${usePassword ? '' : passkeyHelp}关闭页面后，有效期内可以直接返回。点击退出会结束当前登录。</p>
+        </section>
+      </section>`);
     banner(message, Boolean(message && message !== '已退出这台设备。'));
-    const form = root.querySelector<HTMLFormElement>('#login-form');
-    form?.addEventListener('submit', (event) => {
+    const form = root.querySelector<HTMLFormElement>('#login-form')!;
+    const submit = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
+    const switchMethod = form.querySelector<HTMLButtonElement>('#login-method-switch');
+    const passwordInput = form.querySelector<HTMLInputElement>('[name="password"]');
+    const readDevice = () => ({ deviceName: formValue(form, 'deviceName'), remember: new FormData(form).has('remember') });
+    switchMethod?.addEventListener('click', () => showLogin('', readDevice(), usePassword ? 'passkey' : 'password'));
+    passwordInput?.focus();
+    form.addEventListener('submit', (event) => {
       event.preventDefault();
-      const button = form.querySelector<HTMLButtonElement>('button')!;
+      if (submit.disabled) return;
+      if (switchMethod) switchMethod.disabled = true;
       void action(async () => {
-        if (!window.PublicKeyCredential) { banner('当前浏览器不支持通行密钥，请使用最新版 Safari、Edge 或 Chrome。', true); return; }
-        const chosen = { deviceName: formValue(form, 'deviceName'), remember: new FormData(form).has('remember') };
-        banner('请完成系统弹出的通行密钥验证。');
-        const flow = await request<Options<AuthenticationOptions>>('/admin/login/options', {});
-        if (!rootIsCurrent(version)) return;
-        const response = await startAuthentication({ optionsJSON: flow.options });
-        if (!rootIsCurrent(version)) return;
+        const chosen = readDevice();
+        let verification: Promise<unknown>;
+        if (passwordInput) {
+          banner('正在验证密码。');
+          verification = request('/admin/login/password', { password: passwordInput.value, ...chosen });
+          passwordInput.value = '';
+        } else {
+          if (!window.PublicKeyCredential) { banner('当前浏览器不支持通行密钥，请使用最新版 Safari、Edge 或 Chrome。', true); return; }
+          banner('请完成系统弹出的通行密钥验证。');
+          const flow = await request<Options<AuthenticationOptions>>('/admin/login/options', {});
+          if (!rootIsCurrent(version)) return;
+          const response = await startAuthentication({ optionsJSON: flow.options });
+          if (!rootIsCurrent(version)) return;
+          verification = request('/admin/login/verify', { flowId: flow.flowId, response, ...chosen });
+        }
         let verified = false;
         try {
-          await request('/admin/login/verify', { flowId: flow.flowId, response, ...chosen });
-          verified = true; form.reset();
+          await verification;
+          verified = true;
           const account = await request<Me>('/admin/me');
           if (!rootIsCurrent(version)) return;
-          me = account; setupToken = ''; history.replaceState(null, '', '#/admin'); showDashboard();
+          enterDashboard(account);
         } catch (error) {
           if (!rootIsCurrent(version) || error instanceof StaleRequestError) return;
           if (verified || error instanceof ApiError && (error.status === 0 || error.status >= 500)) {
             try {
               const account = await request<Me>('/admin/me');
               if (!rootIsCurrent(version)) return;
-              me = account; history.replaceState(null, '', '#/admin'); showDashboard(); return;
+              enterDashboard(account); return;
             } catch (confirmation) {
               if (!rootIsCurrent(version) || confirmation instanceof StaleRequestError) return;
-              if (!(confirmation instanceof ApiError && confirmation.status === 401)) { showLoginConnectionRetry(error, chosen); return; }
+              if (!(confirmation instanceof ApiError && confirmation.status === 401)) { showLoginConnectionRetry(error, chosen, method); return; }
             }
           }
-          showLogin('', true, chosen); reportError(error);
+          showLogin('', chosen, method); reportError(error);
         }
-      }, button);
+      }, submit).finally(() => { if (switchMethod?.isConnected) switchMethod.disabled = false; });
     });
   }
-  function showLoginConnectionRetry(error: unknown, device: DeviceChoice) {
-    const version = shell('<section class="admin-auth"><p class="eyebrow">CONFIRM YOUR SESSION</p><h1>请重新确认连接。</h1><p class="admin-copy">暂时未能确认登录结果。先重新连接后台，避免重复提交已经使用的验证。</p><div id="admin-message" class="admin-banner" role="status"></div><button class="secondary" id="confirm-login" type="button">重新连接后台</button></section>');
+  function enterDashboard(account: Me) {
+    me = account; setupToken = ''; history.replaceState(null, '', '#/admin'); showDashboard();
+  }
+  function showLoginConnectionRetry(error: unknown, device: DeviceChoice, method: LoginMethod) {
+    const version = shell('<section class="admin-auth"><p class="eyebrow">CONFIRM YOUR SESSION</p><h1>请重新确认连接。</h1><p class="admin-copy">暂时未能确认登录结果。请先重新连接后台，检查登录状态。</p><div id="admin-message" class="admin-banner" role="status"></div><button class="secondary" id="confirm-login" type="button">重新连接后台</button></section>');
     reportError(error);
     const button = root.querySelector<HTMLButtonElement>('#confirm-login')!;
     button.addEventListener('click', () => void action(async () => {
-      try { const account = await request<Me>('/admin/me'); if (rootIsCurrent(version)) { me = account; showDashboard(); } }
-      catch (failure) { if (!rootIsCurrent(version) || failure instanceof StaleRequestError) return; if (failure instanceof ApiError && failure.status === 401) { showLogin('', true, device); reportError(failure); } else throw failure; }
+      try { const account = await request<Me>('/admin/me'); if (rootIsCurrent(version)) enterDashboard(account); }
+      catch (failure) { if (!rootIsCurrent(version) || failure instanceof StaleRequestError) return; if (failure instanceof ApiError && failure.status === 401) { showLogin('', device, method); reportError(failure); } else throw failure; }
     }, button));
   }
   function showSetup() {
@@ -366,9 +413,15 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   function showDashboard() {
     if (!me || !alive) return;
-    const headings = { invites: ['邀请链接', '为每位受邀者设置可见内容与有效期。'], devices: ['登录设备', '查看和管理能够进入后台的浏览器登录。'], passkeys: ['通行密钥', '为常用设备保存登录方式，并管理已经添加的凭据。'] };
+    const headings = {
+      invites: ['邀请链接', '为每位受邀者设置可见内容与有效期。'],
+      devices: ['登录设备', '查看和管理能够进入后台的浏览器登录。'],
+      passkeys: ['通行密钥', '为常用设备保存登录方式，并管理已经添加的凭据。'],
+      password: ['登录密码', '为后台启用一个备用登录方式。'],
+    };
     const [title, description] = headings[tab];
-    const version = shell(`<section class="admin-intro"><div><p class="eyebrow">PRIVATE APPOINTMENTS</p><h1>${title}</h1><p>${description}</p></div><span class="admin-pill">已验证的管理会话</span></section><nav class="admin-tabs" aria-label="后台管理"><button class="admin-tab" data-tab="invites" role="tab" aria-selected="${tab === 'invites'}">邀请链接</button><button class="admin-tab" data-tab="devices" role="tab" aria-selected="${tab === 'devices'}">登录设备</button><button class="admin-tab" data-tab="passkeys" role="tab" aria-selected="${tab === 'passkeys'}">通行密钥</button></nav><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><div id="admin-content"><p class="admin-loading">正在读取…</p></div>`, true);
+    const tabs = Object.entries(headings).map(([key, [label]]) => `<button class="admin-tab" data-tab="${key}" role="tab" aria-selected="${tab === key}">${label}</button>`).join('');
+    const version = shell(`<section class="admin-intro"><div><p class="eyebrow">PRIVATE APPOINTMENTS</p><h1>${title}</h1><p>${description}</p></div><span class="admin-pill">已验证的管理会话</span></section><nav class="admin-tabs" aria-label="后台管理">${tabs}</nav><div id="admin-message" class="admin-banner" role="status" aria-live="polite"></div><div id="admin-content"><p class="admin-loading">正在读取…</p></div>`, true);
     root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button => button.addEventListener('click', () => { tab = button.dataset.tab as typeof tab; showDashboard(); }));
     void action(async () => {
       if (tab === 'invites') {
@@ -377,9 +430,12 @@ export function renderAdmin(root: HTMLElement): () => void {
       } else if (tab === 'devices') {
         const data = await request<{ devices: Session[] }>('/admin/devices');
         if (rootIsCurrent(version)) showDevices(data.devices);
-      } else {
+      } else if (tab === 'passkeys') {
         const data = await request<{ passkeys: Passkey[] }>('/admin/passkeys');
         if (rootIsCurrent(version)) showPasskeys(data.passkeys);
+      } else {
+        const data = await request<PasswordSettings>('/admin/password');
+        if (rootIsCurrent(version)) showPasswordSettings(data);
       }
     });
   }
@@ -471,12 +527,12 @@ export function renderAdmin(root: HTMLElement): () => void {
     if (!devices.length) list.innerHTML = '<p class="admin-empty">没有可用的设备记录。</p>';
     for (const device of devices) {
       const item = document.createElement('article'); item.className = 'admin-item';
-      item.innerHTML = `<div class="admin-item-head"><h3>${e(device.label)}</h3>${device.current ? '<span class="admin-pill">当前设备</span>' : ''}</div><p class="admin-item-description">${e(device.os)} · ${e(device.browser)}</p><div class="admin-item-meta"><span>首次登录 ${e(formatTime(device.createdAt))}</span><span>最近使用 ${e(formatTime(device.lastSeenAt))}</span><span>有效至 ${e(formatTime(device.expiresAt))}</span></div><form class="admin-device-rename"><label class="admin-field">设备名称<input name="label" maxlength="80" value="${e(device.label)}" required></label><div class="admin-actions"><button class="secondary" type="submit">保存名称</button><button class="text-button admin-danger" type="button">${device.current ? '退出当前登录' : '移除登录'}</button></div></form>`;
+      item.innerHTML = `<div class="admin-item-head"><h3>${e(device.label)}</h3>${device.current ? '<span class="admin-pill">当前设备</span>' : ''}</div><p class="admin-item-description">${e(device.os)} · ${e(device.browser)} · ${device.method === 'password' ? '密码登录' : '通行密钥登录'}</p><div class="admin-item-meta"><span>首次登录 ${e(formatTime(device.createdAt))}</span><span>最近使用 ${e(formatTime(device.lastSeenAt))}</span><span>有效至 ${e(formatTime(device.expiresAt))}</span></div><form class="admin-device-rename"><label class="admin-field">设备名称<input name="label" maxlength="80" value="${e(device.label)}" required></label><div class="admin-actions"><button class="secondary" type="submit">保存名称</button><button class="text-button admin-danger" type="button">${device.current ? '退出当前登录' : '移除登录'}</button></div></form>`;
       const form = item.querySelector<HTMLFormElement>('form')!;
       form.addEventListener('submit', (event) => { event.preventDefault(); void action(async () => { await request(`/admin/devices/${encodeURIComponent(device.id)}`, { label: formValue(form, 'label') }, 'PATCH'); const data = await request<{ devices: Session[] }>('/admin/devices'); if (rootIsCurrent(version) && me && tab === 'devices') { showDevices(data.devices); banner('设备名称已保存。'); } }, form.querySelector<HTMLButtonElement>('[type="submit"]')!); });
       item.querySelector<HTMLButtonElement>('[type="button"]')!.addEventListener('click', (event) => {
         if (!confirm(device.current ? '确定退出当前设备吗？' : '移除后，这个浏览器需要重新验证才能登录。确定移除吗？')) return;
-        void action(async () => { await request(`/admin/devices/${encodeURIComponent(device.id)}`, {}, 'DELETE'); if (device.current) { clearPrivate(); showLogin('已退出这台设备。'); } else if (rootIsCurrent(version)) { showDashboard(); } }, event.currentTarget as HTMLButtonElement);
+        void action(async () => { await request(`/admin/devices/${encodeURIComponent(device.id)}`, {}, 'DELETE'); if (device.current) { clearPrivate(); await initialize('已退出这台设备。'); } else if (rootIsCurrent(version)) { showDashboard(); } }, event.currentTarget as HTMLButtonElement);
       });
       list.append(item);
     }
@@ -509,6 +565,111 @@ export function renderAdmin(root: HTMLElement): () => void {
       });
       list.append(item);
     }
+  }
+  function showPasswordSettings(settings: PasswordSettings) {
+    const content = root.querySelector<HTMLElement>('#admin-content');
+    if (!content || !me) return;
+    const version = revision;
+    passwordEnabled = settings.enabled;
+    const description = settings.enabled
+      ? `设置于 ${e(formatTime(settings.updatedAt))}。更换或停用密码会退出使用旧密码登录的设备。`
+      : '系统会生成一个随机密码。请将它保存到密码管理器，以便在登录页使用。';
+    content.innerHTML = `
+      <section class="admin-card">
+        <div class="admin-section-head">
+          <h2>密码登录</h2>
+          <span class="admin-pill${settings.enabled ? '' : ' muted'}">${settings.enabled ? '已启用' : '未启用'}</span>
+        </div>
+        <p class="admin-copy">${description}</p>
+        ${me.session.method === 'password'
+          ? '<p class="admin-copy">请退出当前登录，然后使用通行密钥登录以管理密码。</p>'
+          : `<div class="admin-actions">
+              <button class="secondary" type="button" id="generate-password">${settings.enabled ? '更换密码' : '生成登录密码'}</button>
+              ${settings.enabled ? '<button class="text-button admin-danger" type="button" id="disable-password">停用密码登录</button>' : ''}
+            </div>`}
+      </section>`;
+    const generate = content.querySelector<HTMLButtonElement>('#generate-password');
+    const disable = content.querySelector<HTMLButtonElement>('#disable-password');
+    let changing = false;
+    async function changePassword(button: HTMLButtonElement, disabling: boolean) {
+      if (changing) return;
+      if (settings.enabled && !confirm(disabling
+        ? '停用密码登录后，已使用密码登录的设备将退出。确定停用吗？'
+        : '更换后旧密码将失效，已使用旧密码登录的设备将退出。确定更换吗？')) return;
+      changing = true;
+      const other = disabling ? generate : disable;
+      if (other) other.disabled = true;
+      try {
+        await action(async () => {
+          try {
+            if (disabling) {
+              await request('/admin/password', { revision: settings.revision }, 'DELETE');
+              passwordEnabled = false;
+              if (rootIsCurrent(version)) {
+                showPasswordSettings({ enabled: false, revision: null, updatedAt: null });
+                banner('密码登录已停用。');
+              }
+            } else {
+              const result = await request<GeneratedPassword>('/admin/password', { revision: settings.revision });
+              if (typeof result?.password !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(result.password)) {
+                throw new ApiError(503, 'INVALID_PASSWORD_RESULT', 'PASSWORD_SETTINGS');
+              }
+              passwordEnabled = true;
+              if (rootIsCurrent(version)) {
+                showPasswordSettings({ enabled: true, revision: result.revision, updatedAt: result.updatedAt });
+                showGeneratedPassword(result.password);
+              }
+            }
+          } catch (error) {
+            if (error instanceof ApiError && (error.status === 0 || error.status >= 500) && rootIsCurrent(version)) {
+              reportError(error, '暂时无法确认密码设置结果。请重新打开「登录密码」，查看状态后再操作。');
+              return;
+            }
+            throw error;
+          }
+        }, button);
+      } finally {
+        changing = false;
+        if (other?.isConnected) other.disabled = false;
+      }
+    }
+    generate?.addEventListener('click', () => void changePassword(generate, false));
+    disable?.addEventListener('click', () => void changePassword(disable, true));
+  }
+  function showGeneratedPassword(password: string) {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'admin-dialog';
+    dialog.setAttribute('aria-labelledby', 'generated-password-title');
+    dialog.innerHTML = `
+      <h2 id="generated-password-title">新密码已生成</h2>
+      <p class="admin-copy">密码只显示这一次。请将它保存到密码管理器，再关闭此窗口。</p>
+      <label class="admin-field">登录密码<input class="admin-password-secret" readonly autocomplete="off" spellcheck="false"></label>
+      <div class="admin-copy" role="status" id="password-copy-result"></div>
+      <div class="admin-actions admin-dialog-actions">
+        <button class="text-button" type="button" id="close-generated-password">关闭</button>
+        <button class="primary" type="button" id="copy-generated-password" autofocus>复制密码</button>
+      </div>`;
+    const field = dialog.querySelector<HTMLInputElement>('input')!;
+    const result = dialog.querySelector<HTMLElement>('#password-copy-result')!;
+    field.value = password;
+    dialog.querySelector('#copy-generated-password')!.addEventListener('click', async () => {
+      const copied = await copyText(field.value);
+      if (currentDialog !== dialog || !dialog.open) return;
+      result.textContent = copied ? '密码已复制。' : '自动复制未成功，请手动复制上方密码。';
+      if (!copied) { field.focus(); field.select(); }
+    });
+    const close = () => { field.value = ''; dialog.close(); };
+    dialog.querySelector('#close-generated-password')!.addEventListener('click', close);
+    window.addEventListener('pagehide', close, { once: true });
+    dialog.addEventListener('close', () => {
+      window.removeEventListener('pagehide', close);
+      field.value = '';
+      dialog.remove();
+      if (currentDialog === dialog) currentDialog = null;
+    }, { once: true });
+    currentDialog = dialog;
+    root.append(dialog);
+    dialog.showModal();
   }
   async function showReauth(): Promise<void> {
     if (!alive || !me || currentDialog) return;
@@ -547,15 +708,16 @@ export function renderAdmin(root: HTMLElement): () => void {
       root.append(dialog); dialog.showModal();
     });
   }
-  async function initialize() {
+  async function initialize(loginMessage = '') {
     const version = shell('<p class="admin-loading">正在确认管理入口…</p>');
     try {
-      const status = await request<{ configured: boolean }>('/admin/status');
+      const status = await request<{ configured: boolean; passwordEnabled?: boolean }>('/admin/status');
       if (!rootIsCurrent(version)) return;
+      passwordEnabled = status.passwordEnabled === true;
       if (!status.configured) { showSetup(); return; }
       if (setupToken) { setupToken = ''; history.replaceState(null, '', '#/admin'); }
       try { me = await request<Me>('/admin/me'); if (rootIsCurrent(version)) showDashboard(); }
-      catch (error) { if (rootIsCurrent(version)) { if (error instanceof ApiError && error.status === 401) showLogin(); else showUnavailable(error); } }
+      catch (error) { if (rootIsCurrent(version)) { if (error instanceof ApiError && error.status === 401) showLogin(loginMessage); else showUnavailable(error); } }
     } catch (error) { if (rootIsCurrent(version)) showUnavailable(error); }
   }
   function showUnavailable(error: unknown) {

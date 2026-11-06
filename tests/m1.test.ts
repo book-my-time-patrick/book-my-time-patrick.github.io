@@ -13,19 +13,20 @@ const rpID = 'booking.example.test';
 type SetupFlow = { flowId: string; options: PublicKeyCredentialCreationOptionsJSON; totpSecret: string; totpUri: string };
 type LoginFlow = { flowId: string; options: PublicKeyCredentialRequestOptionsJSON };
 type RegisterFlow = { flowId: string; options: PublicKeyCredentialCreationOptionsJSON };
-type SessionView = { id: string; label: string; os: string; browser: string; createdAt: number; lastSeenAt: number; expiresAt: number; recentAuthUntil: number; current: boolean };
+type SessionView = { id: string; label: string; os: string; browser: string; createdAt: number; lastSeenAt: number; expiresAt: number; recentAuthUntil: number; current: boolean; method: 'passkey' | 'password' };
+type GeneratedPassword = { password: string; revision: string; updatedAt: number };
 type Invite = { id: string; label: string; expiresAt: number; revokedAt: number | null; openCount: number; permissions: { modules: string[]; modes: string[] } };
 type Issued = { invite: Invite; token: string; url: string };
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 function cookie(response: Response): string {
   const value = response.headers.get('set-cookie');
-  assert.ok(value, 'A successful two-factor login must issue a session cookie');
+  assert.ok(value, 'A successful login must issue a session cookie');
   return value.split(';', 1)[0];
 }
 async function harness() {
   const DB = openSqlite(':memory:');
   const migrationDir = new URL('../migrations/', import.meta.url);
-  for (const path of (await readdir(migrationDir)).filter(path => path.endsWith('.sql')).sort()) await DB.exec(await readFile(new URL(path, migrationDir), 'utf8'));
+  for (const path of (await readdir(migrationDir)).filter(path => path.endsWith('.sql')).sort()) DB.migrate(path, await readFile(new URL(path, migrationDir), 'utf8'));
   const setupToken = randomBytes(32).toString('base64url');
   const environment: Environment = { DB, SITE_ORIGIN: origin, DATA_ENCRYPTION_KEY: randomBytes(32).toString('base64url'), SETUP_TOKEN_HASH: sha256(setupToken), SETUP_EXPIRES_AT: new Date(Date.now() + 86_400_000).toISOString() };
   const app = createApi();
@@ -74,7 +75,7 @@ test('M1 缺少数据库或密钥时后台安全关闭', async () => {
 
 test('M1 初始化只接受有效的专属凭据，过期、轮换与已完成初始化均拒绝', async () => {
   const h = await harness();
-  assert.deepEqual((await h.request('/api/admin/status')).data, { configured: false });
+  assert.deepEqual((await h.request('/api/admin/status')).data, { configured: false, passwordEnabled: false });
   assert.equal((await h.request('/api/admin/setup/options', 'POST', { setupToken: 'unknown' })).response.status, 403);
   const expired = { ...h.environment, SETUP_EXPIRES_AT: new Date(Date.now() - 1).toISOString() };
   assert.equal((await h.request('/api/admin/setup/options', 'POST', { setupToken: h.setupToken }, { environment: expired })).response.status, 403);
@@ -109,7 +110,7 @@ test('M1 完整初始化加密保存 TOTP，Cookie 与记住设备期限正确',
   const me = await h.request<{ session: SessionView }>('/api/admin/me');
   assert.equal(me.response.status, 200); assert.equal(me.data.session.label, '测试电脑');
   assert.equal(me.data.session.expiresAt, rememberedRow!.expires_at);
-  assert.deepEqual((await h.request('/api/admin/status')).data, { configured: true });
+  assert.deepEqual((await h.request('/api/admin/status')).data, { configured: true, passwordEnabled: false });
   const brief = await configured({ remember: false });
   const briefMe = await brief.request<{ session: SessionView }>('/api/admin/me');
   assert.equal(briefMe.data.session.expiresAt - briefMe.data.session.createdAt, 12 * 3_600_000);
@@ -198,6 +199,94 @@ test('敏感操作要求近期通行密钥验证，重新验证挑战绑定原�
   assert.equal((await h.request('/api/admin/reauth/verify', 'POST', request, { cookie: second.cookie })).response.status, 401);
   assert.equal((await h.request('/api/admin/reauth/verify', 'POST', request)).response.status, 200);
   assert.equal((await h.request('/api/admin/passkeys/options', 'POST', {})).response.status, 200);
+});
+
+test('密码须由通过通行密钥验证的管理员启用，并可创建记住设备的会话', async () => {
+  const h = await configured();
+  const route = '/api/admin/password';
+  const loginPath = '/api/admin/login/password';
+  const incorrect = { password: randomBytes(24).toString('base64url') };
+  const disabled = await h.request(loginPath, 'POST', incorrect, { cookie: '' });
+  assert.equal(disabled.response.status, 401);
+  assert.equal((await h.request(route, 'POST', { revision: null }, { cookie: '' })).response.status, 401);
+  await h.DB.prepare('UPDATE sessions SET recent_auth_at=0').run();
+  const expiredProof = await h.request(route, 'POST', { revision: null });
+  assert.equal(expiredProof.response.status, 403);
+  assert.equal(expiredProof.data.error, 'REAUTH_REQUIRED');
+  const passkey = await login(h);
+  assert.equal(passkey.response.status, 200);
+  h.state.cookie = passkey.cookie;
+  const enabled = await h.request<GeneratedPassword>(route, 'POST', { revision: null });
+  assert.equal(enabled.response.status, 200);
+  const { password, revision, updatedAt } = enabled.data;
+  assert.match(password, /^[A-Za-z0-9_-]{32}$/);
+  assert.deepEqual((await h.request(route)).data, { enabled: true, revision, updatedAt });
+  assert.deepEqual((await h.request('/api/admin/status')).data, { configured: true, passwordEnabled: true });
+  const bad = await h.request(loginPath, 'POST', incorrect, { cookie: '' });
+  assert.equal(bad.response.status, 401);
+  assert.deepEqual(bad.data, disabled.data);
+  assert.equal(bad.response.headers.get('set-cookie'), null);
+  assert.equal((await h.request(loginPath, 'POST', { password }, { origin: 'https://evil.example' })).response.status, 403);
+  const signedIn = await h.request(loginPath, 'POST', { password, remember: true, deviceName: '密码登录设备' }, { cookie: '' });
+  assert.equal(signedIn.response.status, 200);
+  const device = { cookie: cookie(signedIn.response) };
+  const me = await h.request<{ session: SessionView }>('/api/admin/me', 'GET', undefined, device);
+  assert.equal(me.data.session.method, 'password');
+  const expires = new Date(me.data.session.expiresAt), created = new Date(me.data.session.createdAt);
+  assert.equal((expires.getUTCFullYear() - created.getUTCFullYear()) * 12 + expires.getUTCMonth() - created.getUTCMonth(), 6);
+  const devices = await h.request<{ devices: SessionView[] }>('/api/admin/devices', 'GET', undefined, device);
+  assert.ok(devices.data.devices.some(row => row.current && row.method === 'password' && row.label === '密码登录设备'));
+  assert.ok(devices.data.devices.some(row => row.method === 'passkey'));
+  assert.equal((await h.request('/api/admin/invites', 'GET', undefined, device)).response.status, 200);
+  assert.equal((await h.request('/api/admin/passkeys/options', 'POST', {}, device)).data.error, 'REAUTH_REQUIRED');
+  const reauth = await h.request<LoginFlow>('/api/admin/reauth/options', 'POST', {}, device);
+  const proof = h.authenticator.authenticate(reauth.data.options);
+  assert.equal((await h.request('/api/admin/reauth/verify', 'POST', { flowId: reauth.data.flowId, response: proof }, device)).response.status, 200);
+  assert.equal((await h.request('/api/admin/passkeys/options', 'POST', {}, device)).response.status, 200);
+  const forbidden = await h.request(route, 'DELETE', { revision }, device);
+  assert.equal(forbidden.response.status, 403);
+  assert.equal(forbidden.data.error, 'PASSKEY_LOGIN_REQUIRED');
+});
+
+test('并发更换密码只接受一个版本，停用和更换立即撤销旧密码会话', async () => {
+  const h = await configured();
+  const route = '/api/admin/password';
+  const first = await h.request<GeneratedPassword>(route, 'POST', { revision: null });
+  assert.equal(first.response.status, 200);
+  const signIn = (password: string) => h.request('/api/admin/login/password', 'POST', { password, remember: false }, { cookie: '' });
+  const old = { cookie: cookie((await signIn(first.data.password)).response) };
+  const rotations = await Promise.all([1, 2].map(() => h.request<GeneratedPassword>(route, 'POST', { revision: first.data.revision })));
+  assert.deepEqual(rotations.map(result => result.response.status).sort(), [200, 409]);
+  const current = rotations.find(result => result.response.status === 200)!.data;
+  assert.notEqual(current.password, first.data.password);
+  assert.equal((await h.request(route, 'DELETE', { revision: first.data.revision })).response.status, 409);
+  assert.equal((await signIn(first.data.password)).response.status, 401);
+  assert.equal((await h.request('/api/admin/me', 'GET', undefined, old)).response.status, 401);
+  const renewed = { cookie: cookie((await signIn(current.password)).response) };
+  const me = await h.request<{ session: SessionView }>('/api/admin/me', 'GET', undefined, renewed);
+  assert.equal(me.data.session.expiresAt - me.data.session.createdAt, 12 * 3_600_000);
+  assert.equal((await h.request(route, 'DELETE', { revision: current.revision })).response.status, 200);
+  assert.equal((await h.request('/api/admin/me', 'GET', undefined, renewed)).response.status, 401);
+  assert.equal((await signIn(current.password)).response.status, 401);
+  assert.equal((await h.request('/api/admin/me')).response.status, 200);
+  assert.deepEqual((await h.request('/api/admin/status')).data, { configured: true, passwordEnabled: false });
+});
+
+test('密码尝试受限流保护，通行密钥使用独立额度', async t => {
+  t.mock.method(Date, 'now', () => 1_800_000_001_000);
+  const h = await configured();
+  const enabled = await h.request<GeneratedPassword>('/api/admin/password', 'POST', { revision: null });
+  assert.equal(enabled.response.status, 200);
+  const password = randomBytes(24).toString('base64url');
+  let limited = false;
+  for (let i = 0; i < 16; i++) {
+    const attempt = await h.request('/api/admin/login/password', 'POST', { password }, { cookie: '' });
+    if (attempt.response.status === 429) { limited = true; break; }
+    assert.equal(attempt.response.status, 401);
+  }
+  assert.ok(limited);
+  assert.equal((await h.request('/api/admin/login/password', 'POST', { password: enabled.data.password }, { cookie: '' })).response.status, 429);
+  assert.equal((await login(h)).response.status, 200);
 });
 
 test('M1 保留最后一个通行密钥，撤销其他凭据立即使其会话失效', async () => {
