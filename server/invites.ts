@@ -50,7 +50,7 @@ async function issue(c:Ctx,creator:string,input:{label:string;expiresAt:number;p
 export function mountInvites(app:Hono<{Bindings:Environment}>) {
  app.get('/api/admin/invites',async c=>{
   await owner(c); const rows=await database(c).prepare("SELECT * FROM invites WHERE kind='invite' ORDER BY created_at DESC LIMIT 5000").all<InviteRow>();
-  return c.json({invites:rows.results.map(view)});
+  return c.json({invites:rows.results.map(view),now:Date.now()});
  });
  app.post('/api/admin/invites',async c=>{
   const session=await owner(c), data=await body(c);

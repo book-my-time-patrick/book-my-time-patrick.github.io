@@ -1,12 +1,12 @@
 export const BOOKING_TIMEZONE = 'Asia/Shanghai';
 export const REQUEST_DURATIONS = [30, 60, 90, 120] as const;
 export const BOOKING_DAY = 86_400_000;
+export const REQUEST_HORIZON = 30 * BOOKING_DAY;
 const MINUTE = 60_000;
 const UTC_OFFSET = 8 * 60 * MINUTE;
 const SLOT_STEP = 30 * MINUTE;
 const OPEN_MINUTE = 9 * 60;
 const CLOSE_MINUTE = 21 * 60;
-const MAX_AHEAD = 30 * BOOKING_DAY;
 const WEEK = 7 * BOOKING_DAY;
 
 export type SlotState = 'expired' | 'request' | 'unavailable';
@@ -17,7 +17,7 @@ export function bookingDate(timestamp: number): string {
 
 export function isRequestSlot(startAt: number, duration: number, now: number): boolean {
   if (!Number.isSafeInteger(startAt) || !REQUEST_DURATIONS.some(value => value === duration)) return false;
-  if (startAt <= now || startAt > now + MAX_AHEAD || startAt % SLOT_STEP !== 0) return false;
+  if (startAt <= now || startAt > now + REQUEST_HORIZON || startAt % SLOT_STEP !== 0) return false;
   const local = new Date(startAt + UTC_OFFSET);
   const day = local.getUTCDay();
   const minute = local.getUTCHours() * 60 + local.getUTCMinutes();
@@ -28,7 +28,7 @@ export function requestWeek(now: number, requestedWeek: number, allowRequests: b
   const localDay = Math.floor((now + UTC_OFFSET) / BOOKING_DAY) * BOOKING_DAY - UTC_OFFSET;
   const dayOfWeek = new Date(now + UTC_OFFSET).getUTCDay();
   const firstMonday = localDay - ((dayOfWeek + 6) % 7) * BOOKING_DAY;
-  const maxWeek = Math.floor((now + MAX_AHEAD - firstMonday) / WEEK);
+  const maxWeek = Math.floor((now + REQUEST_HORIZON - firstMonday) / WEEK);
   const week = Math.min(requestedWeek, maxWeek);
   const start = firstMonday + week * WEEK;
   const days = Array.from({ length: 7 }, (_, index) => {

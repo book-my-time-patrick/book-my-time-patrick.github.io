@@ -34,6 +34,7 @@ export interface MailSettings {
 }
 
 interface MailInvite { id: string; label: string }
+export interface CalendarLocationSettings { defaultCity: string; dates: { date: string; city: string }[] }
 export interface PanelActions {
   request<T = { ok: boolean }>(path: string, body?: unknown, method?: string): Promise<T>;
   run(operation: () => Promise<void>, button?: HTMLButtonElement): Promise<void>;
@@ -333,5 +334,69 @@ export function renderMailSettings(content: HTMLElement, settings: MailSettings,
       await actions.request(`/admin/mail/overrides/${encodeURIComponent(inviteId)}`, { mailboxId: textValue(data, 'mailboxId') || null }, 'PATCH');
       if (actions.isCurrent()) await actions.reload('此邀请的送达邮箱已保存。');
     });
+  }
+}
+
+export function renderCalendarLocation(content: HTMLElement, settings: CalendarLocationSettings, actions: PanelActions, now: number) {
+  const firstDate = bookingDate(now);
+  const lastDate = bookingDate(now + 30 * BOOKING_DAY);
+  content.innerHTML = `
+    <section class="admin-card admin-calendar-location">
+      <h2>默认城市</h2>
+      <p class="admin-copy">仅填写城市，例如深圳或香港。邀请同时开放「预约日历」和「城市行程」时，访客才会看到地点。</p>
+      <form method="post" data-default-city>
+        <label class="admin-field">城市<input name="defaultCity" maxlength="24" value="${e(settings.defaultCity)}" placeholder="例如深圳" autocomplete="off"><span class="admin-help">留空后保存可清除默认城市。</span></label>
+        <div class="admin-actions"><button class="primary" type="submit">保存默认城市</button></div>
+      </form>
+    </section>
+    <section class="admin-card admin-calendar-location">
+      <h2>按日期设置城市</h2>
+      <p class="admin-copy">指定的日期会优先使用这里的城市。日期按北京时间（Asia/Shanghai，UTC+8）计算，包含所选首尾两天。</p>
+      <form method="post" data-city-range>
+        <div class="admin-form-row">
+          <label class="admin-field">开始日期<input name="startDate" type="date" min="${firstDate}" max="${lastDate}" value="${firstDate}" required></label>
+          <label class="admin-field">结束日期<input name="endDate" type="date" min="${firstDate}" max="${lastDate}" value="${firstDate}" required></label>
+        </div>
+        <label class="admin-field">城市<input name="city" maxlength="24" placeholder="例如香港" autocomplete="off" required></label>
+        <div class="admin-actions"><button class="primary" type="submit">保存日期地点</button></div>
+      </form>
+      <hr class="admin-divider">
+      <div class="admin-section-head"><h2>已设置的日期</h2><span class="admin-count">${settings.dates.length} 天</span></div>
+      <div class="admin-list" data-city-dates></div>
+    </section>`;
+  onSubmit(content.querySelector<HTMLFormElement>('[data-default-city]')!, actions, async data => {
+    const defaultCity = textValue(data, 'defaultCity');
+    await actions.request('/admin/calendar-location', { defaultCity }, 'PATCH');
+    if (actions.isCurrent()) await actions.reload(defaultCity ? '默认城市已保存。' : '默认城市已清除。');
+  });
+  const range = content.querySelector<HTMLFormElement>('[data-city-range]')!;
+  const start = range.querySelector<HTMLInputElement>('[name="startDate"]')!;
+  const end = range.querySelector<HTMLInputElement>('[name="endDate"]')!;
+  start.addEventListener('change', () => {
+    end.min = start.value || firstDate;
+    if (end.value < end.min) end.value = end.min;
+  });
+  onSubmit(range, actions, async data => {
+    const startDate = textValue(data, 'startDate');
+    const endDate = textValue(data, 'endDate');
+    if (endDate < startDate) { actions.banner('结束日期不能早于开始日期。', true); return; }
+    await actions.request('/admin/calendar-location/dates', { startDate, endDate, city: textValue(data, 'city') });
+    if (actions.isCurrent()) await actions.reload('所选日期的城市已保存。');
+  });
+  const list = content.querySelector<HTMLElement>('[data-city-dates]')!;
+  if (!settings.dates.length) list.innerHTML = '<p class="admin-empty">暂无按日期设置的城市。</p>';
+  for (const { date, city } of settings.dates) {
+    const item = document.createElement('article');
+    item.className = 'admin-item admin-location-item';
+    item.innerHTML = `<div><h3>${e(city)}</h3><p class="admin-item-description">${e(date)}</p></div><button class="text-button admin-danger" type="button">移除</button>`;
+    const remove = item.querySelector<HTMLButtonElement>('button')!;
+    remove.addEventListener('click', () => {
+      if (!confirm(`确定移除 ${date} 的城市设置吗？`)) return;
+      void actions.run(async () => {
+        await actions.request(`/admin/calendar-location/dates/${encodeURIComponent(date)}`, {}, 'DELETE');
+        if (actions.isCurrent()) await actions.reload('已移除这一天的城市设置。');
+      }, remove);
+    });
+    list.append(item);
   }
 }

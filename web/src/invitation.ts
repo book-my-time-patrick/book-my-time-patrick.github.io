@@ -53,9 +53,10 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
       if (!alive) return;
       if (!invitation || !Array.isArray(invitation.permissions?.modules) || !Array.isArray(invitation.permissions.modes) || !invitation.profile || typeof invitation.preview !== 'boolean') throw new Error('Invalid response');
       const showCalendar = invitation.permissions.modules.includes('calendar');
+      const showCity = showCalendar && invitation.permissions.modules.includes('travel');
       const allowRequest = invitation.permissions.modes.includes('request');
       const showBooking = showCalendar || allowRequest;
-      const modules = invitation.permissions.modules.filter(name => name !== 'calendar' && Object.hasOwn(moduleNames, name));
+      const modules = invitation.permissions.modules.filter(name => name !== 'calendar' && !(showCity && name === 'travel') && Object.hasOwn(moduleNames, name));
       const displayName = invitation.profile.displayName ? `${e(invitation.profile.displayName)} 的预约空间。` : '';
       const intro = allowRequest ? '选一个合适的时间，留下信息，等待邀请人确认。' : showCalendar ? '查看本次邀请提供的预约时段。' : '请查看本次邀请提供的内容。';
       root.innerHTML = `<main class="invitation-page">
@@ -68,7 +69,7 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
       </main>`;
       if (showBooking) {
         disposeBooking = renderInvitationBooking(root.querySelector<HTMLElement>('#invitation-booking')!, {
-          showCalendar, allowRequest, preview: invitation.preview, send, unavailable,
+          showCalendar, showCity, allowRequest, preview: invitation.preview, send, unavailable,
         });
       }
     } catch (error) {

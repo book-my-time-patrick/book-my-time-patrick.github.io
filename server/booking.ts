@@ -1,6 +1,7 @@
 import type { Context, Hono } from 'hono';
 import { BOOKING_DAY, isRequestSlot, parseEmailAddress, requestWeek } from '../shared/booking.js';
 import { AuthError, requireAdmin } from './auth.js';
+import { withCalendarCities } from './calendar-location.js';
 import type { Environment } from './db.js';
 import { activeInvitation } from './invites.js';
 import { deliverBooking, REQUEST_MAIL_GATE_SQL, requestMailReady } from './mail.js';
@@ -212,11 +213,14 @@ export function mountBookings(app: Hono<{ Bindings: Environment }>) {
     const invitation = await activeInvitation(c, now);
     const permissions = invitePermissions(invitation.permissions_json);
     const canRequest = permissions.modes.includes('request');
-    if (!canRequest && !permissions.modules.includes('calendar')) throw new AuthError(404, 'NOT_FOUND');
+    const canSeeCalendar = permissions.modules.includes('calendar');
+    if (!canRequest && !canSeeCalendar) throw new AuthError(404, 'NOT_FOUND');
     const requestedWeek = c.req.query('week') ?? '0';
     if (!/^\d{1,2}$/.test(requestedWeek)) throw new AuthError(400, 'INVALID_INPUT');
     const canSubmit = invitation.kind === 'invite' && canRequest && await requestMailReady(c);
-    return c.json({ ...requestWeek(now, Number(requestedWeek), canRequest), canSubmit });
+    const week = requestWeek(now, Number(requestedWeek), canRequest);
+    const days = canSeeCalendar && permissions.modules.includes('travel') ? await withCalendarCities(c, week.days, now) : week.days;
+    return c.json({ ...week, days, canSubmit });
   });
 
   app.post('/api/invite/requests', async c => {

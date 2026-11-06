@@ -2,8 +2,10 @@ import './admin.css';
 import { startAuthentication, startRegistration, WebAuthnAbortService } from '@simplewebauthn/browser';
 import { copyText, escapeHtml as e, formatTime, modeNames, moduleNames } from './ui';
 import { createSetupQr } from './qr';
-import { renderBookingInbox, renderMailSettings } from './admin-m2';
-import type { BookingView, MailSettings, PanelActions, RequestFilter } from './admin-m2';
+import { renderBookingInbox, renderCalendarLocation, renderMailSettings } from './admin-m2';
+import type { BookingView, CalendarLocationSettings, MailSettings, PanelActions, RequestFilter } from './admin-m2';
+import { inviteStatus } from './invite-status';
+import type { InviteState } from './invite-status';
 
 type Time = string | number;
 type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
@@ -17,6 +19,7 @@ interface Me { id: string; name: string; session: Session }
 interface PasswordSettings { enabled: boolean; revision: string | null; updatedAt: number | null }
 interface GeneratedPassword { password: string; revision: string; updatedAt: number }
 interface Invite { id: string; label: string; createdAt: Time; expiresAt: Time; revokedAt: Time | null; lastOpenedAt: Time | null; openCount: number; permissions: Permissions }
+interface InviteList { invites: Invite[]; now: number }
 interface Passkey { id: string; name: string; createdAt: Time; lastUsedAt: Time | null; backedUp: boolean; deviceType: string }
 interface Options<T> { flowId: string; options: T }
 interface Setup extends Options<RegistrationOptions> { totpSecret: string; totpUri: string }
@@ -51,6 +54,8 @@ function messageFor(error: unknown): string {
     if (error.code === 'BOOKING_CHANGED') return '这条申请已更新。请刷新预约列表后再处理。';
     if (error.code === 'SLOT_CONFLICT') return '这个时间与站内已确认的预约重叠。请建议其他时间。';
     if (error.code === 'SLOT_UNAVAILABLE') return '这个时间已过去或超出申请范围。请选择未来工作日的其他时间。';
+    if (error.code === 'INVALID_CITY') return '请填写不超过 24 个字符的城市名称，例如深圳或香港。';
+    if (error.code === 'INVALID_DATE_RANGE') return '请选择北京时间今天起 30 天内的日期，结束日期不能早于开始日期。';
     if (error.code === 'MAIL_NOT_CONFIGURED') return '请先保存已验证域名的发件地址和 Resend 密钥。';
     if (error.code === 'MAIL_SEND_FAILED') return '发信服务未确认接收。请检查 Resend 的发件域名和密钥，再重试。';
     if (error.code === 'MAILBOX_UNVERIFIED') return '请先用验证码验证这个邮箱。';
@@ -82,7 +87,8 @@ function localDate(value: Time): string {
   const adjusted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return adjusted.toISOString().slice(0, 16);
 }
-function defaultExpiry(): string { return localDate(Date.now() + 30 * 86400000); }
+const inviteStateLabels: Record<InviteState, string> = { active: '有效', expiring: '即将过期', expired: '已过期', revoked: '已撤销' };
+function isRevoked(invite: Invite): boolean { return invite.revokedAt !== null && invite.revokedAt !== undefined; }
 function formValue(form: HTMLFormElement, key: string): string { return String(new FormData(form).get(key) ?? '').trim(); }
 function permissionsForm(permissions: Permissions): string {
   return `<fieldset class="admin-permissions"><legend>可见内容</legend><div class="admin-check-grid">${Object.entries(moduleNames).map(([value, label]) => `<label class="admin-checkbox"><input type="checkbox" name="modules" value="${value}" ${permissions.modules.includes(value) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset><fieldset class="admin-permissions"><legend>允许的预约方式</legend><div class="admin-check-grid">${Object.entries(modeNames).map(([value, label]) => `<label class="admin-checkbox"><input type="checkbox" name="modes" value="${value}" ${permissions.modes.includes(value) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset>`;
@@ -98,7 +104,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   let revision = 0;
   let identityVersion = 0;
   let me: Me | null = null;
-  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' = 'invites';
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' = 'invites';
   let requestFilter: RequestFilter = 'pending';
   let passwordEnabled = false;
   let setupToken = /^#\/admin\/setup\/([A-Za-z0-9_-]{32,256})$/.exec(location.hash)?.[1] ?? '';
@@ -108,6 +114,11 @@ export function renderAdmin(root: HTMLElement): () => void {
   let pendingSetup: { flow: Setup; response: RegistrationResult; device: DeviceChoice } | null = null;
   let setupSubmitting = false;
   const recentLinks = new Map<string, string>();
+  let inviteNow = () => Date.now();
+  let displayedInvites = new Map<string, Invite>();
+  let inviteExpiryTimer = 0;
+  let refreshInviteBadges: ((invites?: Invite[]) => void) | null = null;
+  let syncingInviteClock = false;
   const rootIsCurrent = (version: number) => alive && revision === version;
 
   function banner(message: string, error = false) {
@@ -127,12 +138,14 @@ export function renderAdmin(root: HTMLElement): () => void {
     target.append(detail, button);
   }
   function shell(content: string, signedIn = false): number {
+    stopInviteWatch();
     revision += 1;
     root.innerHTML = `<main class="admin-page"><header class="admin-header"><a class="admin-wordmark" href="#/admin"><i aria-hidden="true">↗</i>受邀预约 <span class="stage">管理后台</span></a>${signedIn ? `<div class="admin-header-actions"><span class="admin-current-name">${e(me?.session.label || '当前设备')}</span><button class="text-button" type="button" id="admin-logout">退出登录</button></div>` : '<a class="text-button" href="#/">返回首页</a>'}</header>${content}<footer class="admin-footer">仅供管理员使用。邀请与个人资料由服务端验证访问权限。</footer></main>`;
     root.querySelector('#admin-logout')?.addEventListener('click', () => void action(async () => { await request('/admin/logout', {}); clearPrivate(); await initialize('已退出这台设备。'); }));
     return revision;
   }
   function clearPrivate() {
+    stopInviteWatch();
     identityVersion += 1;
     me = null; setup = null; pendingSetup = null; setupSubmitting = false; recentLinks.clear(); setupSuccessVisible = false;
     currentDialog?.close(); currentDialog?.remove(); currentDialog = null;
@@ -435,6 +448,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       invites: ['邀请链接', '为每位受邀者设置可见内容与有效期。'],
       requests: ['预约申请', '处理待确认的申请，查看已确认的预约。'],
       mail: ['邮箱设置', '配置发信服务，验证接收预约通知和日历附件的邮箱。'],
+      location: ['日历地点', '设置预约周历中的城市，按日期调整地点。'],
       devices: ['登录设备', '查看和管理能够进入后台的浏览器登录。'],
       passkeys: ['通行密钥', '为常用设备保存登录方式，并管理已经添加的凭据。'],
       password: ['登录密码', '为后台启用一个备用登录方式。'],
@@ -445,8 +459,8 @@ export function renderAdmin(root: HTMLElement): () => void {
     root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(button => button.addEventListener('click', () => { tab = button.dataset.tab as typeof tab; showDashboard(); }));
     void action(async () => {
       if (tab === 'invites') {
-        const data = await request<{ invites: Invite[] }>('/admin/invites');
-        if (rootIsCurrent(version)) showInvites(data.invites);
+        const data = await request<InviteList>('/admin/invites');
+        if (rootIsCurrent(version)) { observeInviteTime(data.now); showInvites(data.invites); }
       } else if (tab === 'devices') {
         const data = await request<{ devices: Session[] }>('/admin/devices');
         if (rootIsCurrent(version)) showDevices(data.devices);
@@ -461,7 +475,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     });
   }
-  async function showBookingPanel(panel: 'requests' | 'mail', version: number) {
+  async function showBookingPanel(panel: 'requests' | 'mail' | 'location', version: number) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
     const isCurrent = () => rootIsCurrent(version) && me !== null;
@@ -482,15 +496,15 @@ export function renderAdmin(root: HTMLElement): () => void {
       };
       const actions: PanelActions = { request, run, banner, isCurrent, reload };
       await reload();
-    } else {
-      const invites = request<{ invites: Invite[] }>('/admin/invites');
+    } else if (panel === 'mail') {
+      const invites = request<InviteList>('/admin/invites').then(data => ({ ...data, observedAt: performance.now() }));
       const reload = async (message?: string) => {
         const [settings, list] = await Promise.all([request<MailSettings>('/admin/mail'), invites]);
         if (!isCurrent()) return;
         const overrides = new Set(settings.overrides.map(item => item.inviteId));
-        const now = Date.now();
+        const now = Number.isFinite(list.now) ? list.now + performance.now() - list.observedAt : Date.now();
         const available = list.invites.flatMap(invite => {
-          const status = invite.revokedAt !== null ? '已撤销' : epoch(invite.expiresAt) <= now ? '已过期' : '';
+          const status = isRevoked(invite) ? '已撤销' : epoch(invite.expiresAt) <= now ? '已过期' : '';
           return !status || overrides.has(invite.id) ? [{ id: invite.id, label: status ? `${invite.label} · ${status}` : invite.label }] : [];
         });
         renderMailSettings(content, settings, available, actions);
@@ -498,38 +512,127 @@ export function renderAdmin(root: HTMLElement): () => void {
       };
       const actions: PanelActions = { request, run, banner, isCurrent, reload };
       await reload();
+    } else {
+      const reload = async (message?: string) => {
+        const settings = await request<CalendarLocationSettings>('/admin/calendar-location');
+        if (!isCurrent()) return;
+        renderCalendarLocation(content, settings, actions, inviteNow());
+        if (message) banner(message);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      await reload();
     }
+  }
+  function observeInviteTime(serverNow: number) {
+    const time = Number.isFinite(serverNow) ? serverNow : Date.now();
+    const observedAt = performance.now();
+    inviteNow = () => time + (performance.now() - observedAt);
+  }
+  function stopInviteWatch() {
+    window.clearTimeout(inviteExpiryTimer);
+    inviteExpiryTimer = 0;
+    refreshInviteBadges = null;
+    displayedInvites.clear();
+  }
+  async function syncInviteClock() {
+    const update = refreshInviteBadges;
+    update?.();
+    if (!update || syncingInviteClock) return;
+    syncingInviteClock = true;
+    try {
+      const data = await request<InviteList>('/admin/invites');
+      if (refreshInviteBadges === update) {
+        observeInviteTime(data.now);
+        update(data.invites);
+      }
+    } catch { /* Local expiry tracking remains available while disconnected. */ }
+    finally { syncingInviteClock = false; }
+  }
+  function canShareInvite(id: string) {
+    const invite = displayedInvites.get(id);
+    if (!invite) return false;
+    const { state } = inviteStatus(epoch(invite.expiresAt), isRevoked(invite), inviteNow());
+    return state === 'active' || state === 'expiring';
   }
   function showInvites(invites: Invite[], editing?: Invite) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
+    stopInviteWatch();
+    displayedInvites = new Map(invites.map(invite => [invite.id, invite]));
     const version = revision;
     const permissions = editing?.permissions ?? { modules: ['profile', 'calendar', 'contact'], modes: ['request', 'direct', 'open'] };
-    content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(editing ? localDate(editing.expiresAt) : defaultExpiry())}" required></label>${permissionsForm(permissions)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。在「邮箱设置」开放预约申请后，勾选「申请时间」的邀请可接收申请。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
-    content.querySelector('#cancel-edit')?.addEventListener('click', () => showInvites(invites));
+    content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(localDate(editing?.expiresAt ?? inviteNow() + 30 * 86_400_000))}" required></label>${permissionsForm(permissions)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。在「邮箱设置」开放预约申请后，勾选「申请时间」的邀请可接收申请。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
+    content.querySelector('#cancel-edit')?.addEventListener('click', () => showInvites([...displayedInvites.values()]));
     const list = content.querySelector<HTMLElement>('#invite-list')!;
+    const updateRows: ((now: number) => number | null)[] = [];
     if (!invites.length) list.innerHTML = '<p class="admin-empty">还没有邀请。创建第一条链接，选择对方可以看到的内容。</p>';
     for (const invite of invites) {
-      const revoked = invite.revokedAt !== null && invite.revokedAt !== undefined;
-      const expired = epoch(invite.expiresAt) <= Date.now();
       const item = document.createElement('article');
       item.className = 'admin-item';
-      item.innerHTML = `<div class="admin-item-head"><h3>${e(invite.label)}</h3><span class="admin-pill ${revoked || expired ? 'muted' : ''}">${revoked ? '已撤销' : expired ? '已过期' : epoch(invite.expiresAt) - Date.now() < 3 * 86400000 ? '即将过期' : '有效'}</span></div><p class="admin-item-description">${e(invite.permissions.modules.map(name => moduleNames[name]).filter(Boolean).join(' · ') || '未开放展示模块')}</p><div class="admin-item-meta"><span>有效至 ${e(formatTime(invite.expiresAt))}</span><span>打开 ${e(invite.openCount)} 次 · 最近 ${e(formatTime(invite.lastOpenedAt))}</span></div><div class="admin-actions"><button class="secondary" type="button" data-action="edit" ${revoked ? 'disabled' : ''}>编辑 / 延期</button><button class="secondary" type="button" data-action="clone">复制为新链接</button><button class="text-button" type="button" data-action="preview">预览</button>${recentLinks.has(invite.id) ? '<button class="text-button" type="button" data-action="copy">复制链接</button>' : ''}${revoked ? '' : '<button class="text-button admin-danger" type="button" data-action="revoke">撤销</button>'}</div>`;
-      item.querySelector('[data-action="edit"]')!.addEventListener('click', () => { showInvites(invites, invite); content.querySelector<HTMLInputElement>('[name="label"]')?.focus(); });
+      item.innerHTML = `<div class="admin-item-head"><h3>${e(invite.label)}</h3><span class="admin-pill" data-invite-state></span></div><p class="admin-item-description">${e(invite.permissions.modules.map(name => moduleNames[name]).filter(Boolean).join(' · ') || '未开放展示模块')}</p><div class="admin-item-meta"><span data-invite-expiry>有效至 ${e(formatTime(invite.expiresAt))}</span><span>打开 ${e(invite.openCount)} 次 · 最近 ${e(formatTime(invite.lastOpenedAt))}</span></div><div class="admin-actions"><button class="secondary" type="button" data-action="edit">编辑 / 延期</button><button class="secondary" type="button" data-action="clone">复制为新链接</button><button class="text-button" type="button" data-action="preview">预览</button>${recentLinks.has(invite.id) ? '<button class="text-button" type="button" data-action="copy">复制链接</button>' : ''}<button class="text-button admin-danger" type="button" data-action="revoke">撤销</button></div>`;
+      const edit = item.querySelector<HTMLButtonElement>('[data-action="edit"]')!;
+      const copy = item.querySelector<HTMLButtonElement>('[data-action="copy"]');
+      const revoke = item.querySelector<HTMLButtonElement>('[data-action="revoke"]')!;
+      const badge = item.querySelector<HTMLElement>('[data-invite-state]')!;
+      const expiry = item.querySelector<HTMLElement>('[data-invite-expiry]')!;
+      let shownExpiry = invite.expiresAt;
+      updateRows.push(now => {
+        const latest = displayedInvites.get(invite.id) ?? invite;
+        const { state, nextAt } = inviteStatus(epoch(latest.expiresAt), isRevoked(latest), now);
+        if (badge.textContent !== inviteStateLabels[state]) badge.textContent = inviteStateLabels[state];
+        badge.classList.toggle('muted', state === 'revoked' || state === 'expired');
+        badge.classList.toggle('invite-expiring', state === 'expiring');
+        edit.disabled = state === 'revoked';
+        revoke.hidden = state === 'revoked';
+        if (copy) {
+          copy.disabled = state === 'revoked' || state === 'expired';
+          copy.title = state === 'expired' ? '邀请已过期，请延期后再复制' : state === 'revoked' ? '邀请已撤销' : '';
+        }
+        if (shownExpiry !== latest.expiresAt) {
+          shownExpiry = latest.expiresAt;
+          expiry.textContent = `有效至 ${formatTime(shownExpiry)}`;
+        }
+        return nextAt;
+      });
+      edit.addEventListener('click', () => {
+        showInvites([...displayedInvites.values()], displayedInvites.get(invite.id));
+        content.querySelector<HTMLInputElement>('[name="label"]')?.focus();
+      });
       item.querySelector('[data-action="clone"]')!.addEventListener('click', (event) => void action(async () => { const result = await request<{ invite: Invite; url: string }>(`/admin/invites/${encodeURIComponent(invite.id)}/clone`, {}); await refreshInvites(result, version); }, event.currentTarget as HTMLButtonElement));
       item.querySelector('[data-action="preview"]')!.addEventListener('click', (event) => void action(() => createPreview({ inviteId: invite.id }), event.currentTarget as HTMLButtonElement));
-      item.querySelector('[data-action="copy"]')?.addEventListener('click', () => void showCopyResult(recentLinks.get(invite.id)!));
-      item.querySelector('[data-action="revoke"]')?.addEventListener('click', (event) => {
+      copy?.addEventListener('click', () => void copyInvite(invite.id));
+      revoke.addEventListener('click', (event) => {
         if (!confirm('撤销后，对方将无法再使用这条邀请链接。确定撤销吗？')) return;
         void action(async () => { await request(`/admin/invites/${encodeURIComponent(invite.id)}`, {}, 'DELETE'); recentLinks.delete(invite.id); await refreshInvites(undefined, version); if (rootIsCurrent(version)) banner('邀请已撤销，立即生效。'); }, event.currentTarget as HTMLButtonElement);
       });
       list.append(item);
     }
+    const fresh = content.querySelector<HTMLElement>('#new-link')!;
+    function updateBadges(updates?: Invite[]) {
+      window.clearTimeout(inviteExpiryTimer);
+      if (!rootIsCurrent(version) || !content?.isConnected) return;
+      if (updates) for (const invite of updates) {
+        if (displayedInvites.has(invite.id)) displayedInvites.set(invite.id, invite);
+      }
+      const now = inviteNow();
+      let nextAt = Infinity;
+      for (const update of updateRows) nextAt = Math.min(nextAt, update(now) ?? Infinity);
+      if (fresh.dataset.inviteId && !canShareInvite(fresh.dataset.inviteId)) {
+        fresh.replaceChildren();
+        delete fresh.dataset.inviteId;
+      }
+      if (Number.isFinite(nextAt)) {
+        // Timers cannot be scheduled more than 2^31−1 milliseconds ahead.
+        inviteExpiryTimer = window.setTimeout(updateBadges, Math.min(2_147_483_647, Math.max(1, Math.ceil(nextAt - now))));
+      }
+    }
+    refreshInviteBadges = updateBadges;
+    updateBadges();
     const form = content.querySelector<HTMLFormElement>('#invite-form')!;
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       const expiresAt = new Date(formValue(form, 'expiresAt'));
-      if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) { banner('请选择未来的有效期。', true); return; }
+      if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= inviteNow()) { banner('请选择未来的有效期。', true); return; }
       const payload = { label: formValue(form, 'label'), expiresAt: expiresAt.toISOString(), permissions: readPermissions(form) };
       void action(async () => {
         const result = await request<{ invite: Invite; url?: string }>(editing ? `/admin/invites/${encodeURIComponent(editing.id)}` : '/admin/invites', payload, editing ? 'PATCH' : 'POST');
@@ -541,22 +644,40 @@ export function renderAdmin(root: HTMLElement): () => void {
   }
   async function refreshInvites(created?: { invite: Invite; url: string }, expectedRevision = revision) {
     if (created) recentLinks.set(created.invite.id, created.url);
-    const data = await request<{ invites: Invite[] }>('/admin/invites');
+    const data = await request<InviteList>('/admin/invites');
     if (!rootIsCurrent(expectedRevision) || tab !== 'invites' || !me) return;
+    observeInviteTime(data.now);
     showInvites(data.invites);
-    if (created) showNewLink(created.url);
+    if (created) showNewLink(created.invite.id, created.url);
   }
-  function showNewLink(url: string) {
+  function showNewLink(id: string, url: string) {
     const target = root.querySelector<HTMLElement>('#new-link');
-    if (!target || !safeShareUrl(url)) return;
+    if (!target || !safeShareUrl(url) || !canShareInvite(id)) return;
+    target.dataset.inviteId = id;
     target.innerHTML = '<section class="admin-secret"><h2>专属链接已准备好</h2><p class="admin-copy">请现在复制保存。此链接不会显示在公开首页，也不会再次从服务器取回。</p><input readonly aria-label="新邀请链接"><div class="admin-actions"><button class="secondary" type="button">复制链接</button><a class="text-button" target="_blank" rel="noopener noreferrer">打开链接 ↗</a></div></section>';
     target.querySelector<HTMLInputElement>('input')!.value = url;
-    target.querySelector<HTMLAnchorElement>('a')!.href = url;
-    target.querySelector('button')!.addEventListener('click', () => void showCopyResult(url));
+    const open = target.querySelector<HTMLAnchorElement>('a')!;
+    open.href = url;
+    open.addEventListener('click', event => {
+      if (canShareInvite(id)) return;
+      event.preventDefault();
+      refreshInviteBadges?.();
+      banner('这条邀请已失效，请延期或复制为新链接。', true);
+    });
+    target.querySelector('button')!.addEventListener('click', () => void copyInvite(id));
     target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
   function safeShareUrl(value: string): boolean {
     try { const url = new URL(value); return url.origin === location.origin && /^#\/i\/[A-Za-z0-9_-]+$/.test(url.hash); } catch { return false; }
+  }
+  async function copyInvite(id: string) {
+    const url = recentLinks.get(id);
+    if (!url || !safeShareUrl(url) || !canShareInvite(id)) {
+      refreshInviteBadges?.();
+      banner('这条邀请已失效，请延期或复制为新链接。', true);
+      return;
+    }
+    await showCopyResult(url);
   }
   async function showCopyResult(url: string) { const ok = await copyText(url); banner(ok ? '已复制链接。' : '浏览器未允许复制，请选中链接手动复制。', !ok); }
   async function createPreview(payload: { inviteId?: string; permissions?: Permissions }) {
@@ -796,7 +917,9 @@ export function renderAdmin(root: HTMLElement): () => void {
     catch (error) { if (rootIsCurrent(version) && me && !(error instanceof StaleRequestError)) banner('暂时无法确认登录状态，请检查网络。', true); }
     finally { checkingSession = false; }
   }
-  const visibility = () => { if (!document.hidden) void checkSession(); };
+  const visibility = () => {
+    if (!document.hidden) { void syncInviteClock(); void checkSession(); }
+  };
   const clearMailKey = () => {
     const input = root.querySelector<HTMLInputElement>('[data-mail-sender] [name="apiKey"]');
     if (input) input.value = '';

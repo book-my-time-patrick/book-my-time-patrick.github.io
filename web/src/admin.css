@@ -53,6 +53,7 @@
 .admin-item .text-button { min-height: 38px; padding: 8px; }
 .admin-pill { display: inline-block; flex-shrink: 0; padding: 4px 8px; border-radius: 5px; background: #edf3ff; color: #315890; font-size: 10px; line-height: 1.6; }
 .admin-pill.muted { color: #6b7280; background: #f1f3f6; }
+.admin-pill.invite-expiring { color: #825c22; background: #fff5dd; }
 .admin-danger { color: #9e3b35; }
 .admin-empty { font-size: 12px; color: var(--muted); line-height: 1.9; margin: 18px 0; padding: 17px 0; }
 .admin-secret { border: 1px solid #cfdcf8; background: #f3f6fd; padding: 16px; border-radius: 9px; margin-bottom: 18px; }
@@ -134,10 +135,14 @@
 .admin-m2-add-mailbox { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; margin-bottom: 20px; }
 .admin-m2-add-mailbox .admin-field { margin: 0; }
 .admin-m2-enable + .admin-help { margin: 10px 0 16px; }
+.admin-calendar-location .admin-field { min-width: 0; }
+.admin-location-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.admin-location-item .text-button { min-height: 44px; flex-shrink: 0; }
 @media (max-width: 480px) {
   .admin-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 6px; overflow: visible; }
   .admin-tab { min-height: 44px; padding: 6px 2px; }
   .admin-m2-settings input:not([type='checkbox']), .admin-m2-settings select,
-  .admin-m2-inbox input, .admin-m2-inbox select, .admin-m2-editor textarea { font-size: 16px; }
+  .admin-m2-inbox input, .admin-m2-inbox select, .admin-m2-editor textarea,
+  .admin-calendar-location input:not([type='checkbox']) { font-size: 16px; }
   .admin-m2-add-mailbox { grid-template-columns: 1fr; }
 }
