@@ -117,3 +117,27 @@
 .admin-setup-success .admin-help { margin-bottom: 20px; }
 .admin-diagnostic { margin: 9px 0 4px; font: 11px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
 #reauth-step { margin-top: 16px; }
+.admin-m2-filters { margin: 0 0 10px; }
+.admin-m2-filters [aria-pressed='true'] { color: #fff; background: var(--blue); border-color: var(--blue); }
+.admin-m2-filters [aria-pressed='true']:hover { background: #0030a0; }
+.admin-m2-inbox .admin-item .admin-actions button, .admin-m2-settings .admin-item .admin-actions button { min-height: 44px; }
+.admin-m2-time { margin: 10px 0 0; font-size: 15px; font-weight: 550; font-variant-numeric: tabular-nums; line-height: 1.6; }
+.admin-m2-notes { white-space: pre-wrap; }
+.admin-m2-editor { padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: #f7f9fd; }
+.admin-m2-editor h4 { margin: 0 0 13px; font-size: 13px; }
+.admin-m2-editor .admin-help { margin: 0 0 14px; }
+.admin-item .admin-m2-editor .admin-field { max-width: none; min-width: 0; margin-bottom: 14px; }
+.admin-m2-editor textarea { width: 100%; min-height: 60px; padding: 10px 12px; border: 1px solid #dce2ed; border-radius: 7px; background: #fff; color: #0b1220; font: inherit; font-size: 14px; resize: vertical; }
+.admin-m2-editor textarea:focus-visible { outline: 3px solid #aec5f4; outline-offset: 2px; }
+.admin-m2-link { margin-left: .45em; color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
+.admin-m2-settings .admin-field, .admin-m2-settings .admin-form-row > * { min-width: 0; }
+.admin-m2-add-mailbox { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; margin-bottom: 20px; }
+.admin-m2-add-mailbox .admin-field { margin: 0; }
+.admin-m2-enable + .admin-help { margin: 10px 0 16px; }
+@media (max-width: 480px) {
+  .admin-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 6px; overflow: visible; }
+  .admin-tab { min-height: 44px; padding: 6px 2px; }
+  .admin-m2-settings input:not([type='checkbox']), .admin-m2-settings select,
+  .admin-m2-inbox input, .admin-m2-inbox select, .admin-m2-editor textarea { font-size: 16px; }
+  .admin-m2-add-mailbox { grid-template-columns: 1fr; }
+}

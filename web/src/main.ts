@@ -153,6 +153,15 @@ async function route() {
     renderGate(false);
     const { renderInvitation } = await import('./invitation');
     if (version === routeVersion) disposeRoute = renderInvitation(root, hash.slice(4));
+  } else if (hash.startsWith('#/review/')) {
+    const [, , token, action, extra] = hash.split('/');
+    if (extra !== undefined || !token || token.length > 128 || (action !== 'confirm' && action !== 'decline' && action !== 'suggest')) {
+      renderGate(true);
+      return;
+    }
+    renderGate(false);
+    const { renderRequestReview } = await import('./request-review');
+    if (version === routeVersion) disposeRoute = renderRequestReview(root, token, action);
   } else renderGate(Boolean(hash && hash !== '#/' && hash !== '#'));
   } catch {
     if (version === routeVersion) renderGate(true);

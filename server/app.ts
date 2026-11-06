@@ -1,7 +1,10 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { AuthError, mountAuth } from './auth.js';
+import { mountBookings } from './booking.js';
+import { mountBookingReview } from './booking-review.js';
 import { mountInvites } from './invites.js';
+import { mountMailSettings } from './mail-settings.js';
 import type { Environment } from './db.js';
 
 export type { Environment } from './db.js';
@@ -46,6 +49,9 @@ export function createApi() {
   app.get('/api/health', (context) => context.json({ ok: true, service: 'invite-api' }));
   mountAuth(app);
   mountInvites(app);
+  mountBookings(app);
+  mountMailSettings(app);
+  mountBookingReview(app);
   app.all('/api/*', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.all('/api', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.get('/robots.txt', (context) => context.text('User-agent: *\nDisallow: /\n'));

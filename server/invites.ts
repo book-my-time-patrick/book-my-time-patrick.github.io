@@ -13,6 +13,13 @@ function random() { const bytes = crypto.getRandomValues(new Uint8Array(32)); re
 async function digest(value: string) { const bytes = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)); return [...new Uint8Array(bytes)].map(n=>n.toString(16).padStart(2,'0')).join(''); }
 function fail(status: number, code: string): never { throw new AuthError(status,code); }
 function database(c: Ctx) { if (!c.env.DB || !c.env.SITE_ORIGIN) return fail(503,'SERVICE_UNAVAILABLE'); return c.env.DB; }
+export async function activeInvitation(c: Ctx, now = Date.now()) {
+ const header=c.req.header('Authorization')??'';
+ if(!/^Bearer [A-Za-z0-9_-]{43}$/.test(header)) return fail(404,'NOT_FOUND');
+ const row=await database(c).prepare('SELECT * FROM invites WHERE token_hash=? AND revoked_at IS NULL AND expires_at>?').bind(await digest(header.slice(7)),now).first<InviteRow>();
+ if(!row) return fail(404,'NOT_FOUND');
+ return row;
+}
 function permissions(input: unknown): Permissions {
   if (input === undefined) return structuredClone(defaults);
   if (!input || typeof input !== 'object') return fail(400,'INVALID_INPUT');
@@ -73,13 +80,9 @@ export function mountInvites(app:Hono<{Bindings:Environment}>) {
   return c.json({url:issued.url,expiresAt:issued.expiresAt},201);
  });
  app.get('/api/invite',async c=>{
-  const db=database(c), header=c.req.header('Authorization')??'';
-  if(!/^Bearer [A-Za-z0-9_-]{43}$/.test(header)) return fail(404,'NOT_FOUND');
-  const now=Date.now();
-  const row=await db.prepare('SELECT * FROM invites WHERE token_hash=? AND revoked_at IS NULL AND expires_at>?').bind(await digest(header.slice(7)),now).first<InviteRow>();
-  if(!row) return fail(404,'NOT_FOUND');
+  const now=Date.now(), row=await activeInvitation(c,now);
   if(row.kind==='invite') {
-   const accepted=await db.prepare("UPDATE invites SET last_opened_at=?,open_count=open_count+1 WHERE id=? AND revoked_at IS NULL AND expires_at>? RETURNING id").bind(now,row.id,now).first();
+   const accepted=await database(c).prepare("UPDATE invites SET last_opened_at=?,open_count=open_count+1 WHERE id=? AND revoked_at IS NULL AND expires_at>? RETURNING id").bind(now,row.id,now).first();
    if(!accepted) return fail(404,'NOT_FOUND');
   }
   return c.json({preview:row.kind==='preview',expiresAt:row.expires_at,permissions:JSON.parse(row.permissions_json),profile:{displayName:''}});

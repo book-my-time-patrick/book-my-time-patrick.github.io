@@ -1,0 +1,70 @@
+.invitation-card.booking-card { margin: 0 0 16px; padding: 22px; min-width: 0; }
+.booking-section-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.booking-section-head .eyebrow { font-size: 10px; margin: 0 0 6px; }
+.booking-section-head h2 { font-size: 21px; margin: 0; }
+.booking-zone { color: var(--muted); font-size: 12px; }
+.booking-week-nav { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; gap: 8px; padding: 10px 0; }
+.booking-week-nav .secondary { padding: 0; min-width: 44px; min-height: 44px; font-size: 18px; }
+.booking-week-range { text-align: center; font-variant-numeric: tabular-nums; }
+.booking-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 12px; margin: 7px 0 14px; }
+.booking-legend span { display: flex; align-items: center; gap: 5px; }
+.booking-key { width: 17px; height: 14px; display: inline-grid; place-items: center; border-radius: 3px; border: 1px solid transparent; font: normal 10px sans-serif; }
+.booking-key.request, .booking-slot.request { border-color: #c7d7f7; background: #edf3ff; color: #15428f; }
+.booking-key.selected, .booking-slot.selected { border-color: var(--blue); background: #dbe7ff; color: #163b77; }
+.booking-key.expired, .booking-slot.expired { background: #f1f2f5; color: #6d7483; }
+.booking-key.unavailable, .booking-slot.unavailable { background: #fafbfd; color: #777e8d; }
+.booking-week-grid { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
+.booking-week-grid th { font-weight: 500; text-align: center; }
+.booking-week-grid thead th { border-bottom: 1px solid var(--line); padding: 6px 1px; vertical-align: bottom; }
+.booking-week-grid th:first-child { width: 50px; }
+.booking-week-grid thead span { display: block; font-size: 10px; color: var(--muted); margin-top: 4px; }
+.booking-week-grid thead .today { background: #edf3ff; color: var(--blue); border-radius: 6px 6px 0 0; }
+.booking-week-grid thead small { display: block; font-size: 10px; margin-top: 4px; }
+.booking-week-grid tbody th { color: var(--muted); font-variant-numeric: tabular-nums; }
+.booking-week-grid td { padding: 1px; }
+.booking-week-grid .booking-hour { border-top: 1px solid var(--line); }
+.booking-slot { display: flex; gap: 3px; justify-content: center; align-items: center; border: 1px solid transparent; border-radius: 4px; min-height: 24px; width: 100%; padding: 2px; font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; }
+button.booking-slot.request:hover { background: #dbe7ff; border-color: var(--blue); }
+.booking-slot:focus-visible, .booking-days button:focus-visible { outline-offset: -2px; outline-color: var(--blue); }
+.booking-day-view { display: none; }
+.invitation-card .booking-caption { margin: 12px 0; }
+.booking-fields { border: 0; padding: 0; margin: 15px 0 0; min-inline-size: 0; }
+.booking-form label { min-width: 0; }
+.booking-form input, .booking-form textarea { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--line); border-radius: 7px; background: #f9faff; color: #0b1220; padding: 10px 12px; font: inherit; font-size: 14px; }
+.booking-form textarea { resize: vertical; }
+.booking-form input:focus-visible, .booking-form textarea:focus-visible { outline: 3px solid #8aa8ec; outline-offset: 2px; }
+.booking-time-fields, .booking-contact-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.booking-contact-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr); }
+.invitation-card .booking-choice { border: 1px solid #d7e3fa; border-radius: 7px; background: #f5f8ff; color: #315890; padding: 9px 12px; margin: 0 0 17px; }
+.invitation-card .booking-visitor-time { margin: -8px 0 14px; }
+.booking-honeypot { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+.booking-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.booking-actions .primary { width: auto; min-width: 120px; justify-content: center; }
+.invitation-card .booking-message { margin-top: 10px; }
+.invitation-card .booking-message:empty, .booking-feedback:empty { display: none; }
+.invitation-card .booking-message.error { color: #8f3832; }
+.invitation-card .booking-feedback { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+.booking-feedback .text-button { color: var(--blue); }
+.booking-manual-copy { margin-top: 10px; }
+.booking-manual-copy[hidden] { display: none; }
+.booking-receipt { color: #244879; background: #f0f4fd; border: 1px solid #cfdcf8; border-radius: 8px; padding: 14px 16px; }
+.booking-receipt p { margin-top: 6px; }
+@media (max-width: 640px) {
+  .invitation-card.booking-card { padding: 14px 11px; }
+  .booking-section-head h2 { font-size: 19px; }
+  .booking-week-grid { display: none; }
+  .booking-day-view { display: block; }
+  .booking-days { display: flex; max-width: 100%; overflow-x: auto; margin-bottom: 12px; }
+  .booking-days button { flex: 1 0 44px; min-height: 46px; color: var(--muted); border: 1px solid transparent; border-radius: 6px; background: #fff; padding: 5px 1px; font-size: 11px; line-height: 1.45; }
+  .booking-days button span { display: block; }
+  .booking-days button[aria-current='date'] { background: #f2f6fe; color: var(--blue); font-weight: 650; }
+  .booking-days button[aria-pressed='true'] { border-color: var(--blue); color: var(--blue); }
+  .invitation-card .booking-day-title { font-weight: 550; margin: 0 0 8px; color: #0b1220; }
+  .booking-day-slots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+  .booking-day-slots .booking-slot { min-height: 44px; font-size: 13px; }
+  .booking-jump { padding-inline: 0; color: var(--blue); }
+  .booking-time-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .booking-time-fields label:first-child { grid-column: 1 / -1; }
+  .booking-contact-fields { grid-template-columns: 1fr; }
+  .booking-form input, .booking-form textarea, .booking-form select { font-size: 16px; }
+}

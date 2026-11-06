@@ -2,6 +2,8 @@ import './admin.css';
 import { startAuthentication, startRegistration, WebAuthnAbortService } from '@simplewebauthn/browser';
 import { copyText, escapeHtml as e, formatTime, modeNames, moduleNames } from './ui';
 import { createSetupQr } from './qr';
+import { renderBookingInbox, renderMailSettings } from './admin-m2';
+import type { BookingView, MailSettings, PanelActions, RequestFilter } from './admin-m2';
 
 type Time = string | number;
 type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
@@ -26,6 +28,8 @@ function diagnosticFor(error: unknown): string {
   return JSON.stringify(error instanceof ApiError ? { error: error.code, httpStatus: error.status, phase: error.phase, ...(error.ray ? { cfRay: error.ray } : {}) } : { error: 'CLIENT_AUTHENTICATION_ERROR', phase: 'SYSTEM_AUTH' });
 }
 function requestPhase(path: string): string {
+  if (path.startsWith('/admin/requests')) return 'BOOKING_ADMIN';
+  if (path.startsWith('/admin/mail')) return 'MAIL_ADMIN';
   const phases: Record<string, string> = { '/admin/setup/options': 'SETUP_START', '/admin/setup/verify': 'SETUP_VERIFY', '/admin/login/options': 'LOGIN_START', '/admin/login/verify': 'LOGIN_VERIFY', '/admin/login/password': 'PASSWORD_LOGIN', '/admin/password': 'PASSWORD_SETTINGS', '/admin/reauth/options': 'REAUTH_START', '/admin/reauth/verify': 'REAUTH_VERIFY', '/admin/me': 'SESSION_CHECK', '/admin/status': 'ADMIN_STATUS' };
   return phases[path] ?? 'ADMIN_API';
 }
@@ -44,6 +48,19 @@ function messageFor(error: unknown): string {
     if (error.code === 'REAUTH_REQUIRED') return '请再次验证身份后重试刚才的操作。';
     if (error.code === 'PASSKEY_LOGIN_REQUIRED') return '请退出当前登录，然后使用通行密钥登录以管理密码。';
     if (error.code === 'PASSWORD_CHANGED') return '密码状态已更新。请重新打开「登录密码」，查看状态后再操作。';
+    if (error.code === 'BOOKING_CHANGED') return '这条申请已更新。请刷新预约列表后再处理。';
+    if (error.code === 'SLOT_CONFLICT') return '这个时间与站内已确认的预约重叠。请建议其他时间。';
+    if (error.code === 'SLOT_UNAVAILABLE') return '这个时间已过去或超出申请范围。请选择未来工作日的其他时间。';
+    if (error.code === 'MAIL_NOT_CONFIGURED') return '请先保存已验证域名的发件地址和 Resend 密钥。';
+    if (error.code === 'MAIL_SEND_FAILED') return '发信服务未确认接收。请检查 Resend 的发件域名和密钥，再重试。';
+    if (error.code === 'MAILBOX_UNVERIFIED') return '请先用验证码验证这个邮箱。';
+    if (error.code === 'MAILBOX_IN_USE') return '这个邮箱仍用于送达或通知。请先改用其他邮箱或清除邀请覆盖。';
+    if (error.code === 'CODE_INVALID') return '验证码错误或已过期。请核对最近收到的验证码，或重新发送。';
+    if (error.code === 'MAILBOX_EXISTS') return '这个邮箱已添加，请在邮箱列表中查看。';
+    if (error.code === 'MAILBOX_LIMIT') return '最多可添加 20 个邮箱。请先移除一个不用的邮箱。';
+    if (error.code === 'MAILBOX_ALREADY_VERIFIED') return '这个邮箱已经验证。请刷新邮箱设置。';
+    if (error.code === 'MAIL_SETTINGS_CHANGED') return '邮箱设置已更新。请重新打开「邮箱设置」后再操作。';
+    if (error.code === 'INVALID_INPUT' && (error.phase === 'BOOKING_ADMIN' || error.phase === 'MAIL_ADMIN')) return '请核对填写的内容后重试。';
     if (error.code === 'LAST_PASSKEY' || error.code === 'LAST_CREDENTIAL') return '至少需要保留一把通行密钥，请先添加另一把。';
     if (error.status === 503) return '管理服务暂时无法使用，请稍后重试。';
     if (error.status === 401 && error.phase === 'PASSWORD_LOGIN') return '密码验证未通过。请确认密码，或改用通行密钥。';
@@ -81,7 +98,8 @@ export function renderAdmin(root: HTMLElement): () => void {
   let revision = 0;
   let identityVersion = 0;
   let me: Me | null = null;
-  let tab: 'invites' | 'devices' | 'passkeys' | 'password' = 'invites';
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' = 'invites';
+  let requestFilter: RequestFilter = 'pending';
   let passwordEnabled = false;
   let setupToken = /^#\/admin\/setup\/([A-Za-z0-9_-]{32,256})$/.exec(location.hash)?.[1] ?? '';
   let setup: Setup | null = null;
@@ -415,6 +433,8 @@ export function renderAdmin(root: HTMLElement): () => void {
     if (!me || !alive) return;
     const headings = {
       invites: ['邀请链接', '为每位受邀者设置可见内容与有效期。'],
+      requests: ['预约申请', '处理待确认的申请，查看已确认的预约。'],
+      mail: ['邮箱设置', '配置发信服务，验证接收预约通知和日历附件的邮箱。'],
       devices: ['登录设备', '查看和管理能够进入后台的浏览器登录。'],
       passkeys: ['通行密钥', '为常用设备保存登录方式，并管理已经添加的凭据。'],
       password: ['登录密码', '为后台启用一个备用登录方式。'],
@@ -433,18 +453,59 @@ export function renderAdmin(root: HTMLElement): () => void {
       } else if (tab === 'passkeys') {
         const data = await request<{ passkeys: Passkey[] }>('/admin/passkeys');
         if (rootIsCurrent(version)) showPasskeys(data.passkeys);
-      } else {
+      } else if (tab === 'password') {
         const data = await request<PasswordSettings>('/admin/password');
         if (rootIsCurrent(version)) showPasswordSettings(data);
+      } else {
+        await showBookingPanel(tab, version);
       }
     });
+  }
+  async function showBookingPanel(panel: 'requests' | 'mail', version: number) {
+    const content = root.querySelector<HTMLElement>('#admin-content');
+    if (!content) return;
+    const isCurrent = () => rootIsCurrent(version) && me !== null;
+    let busy = false;
+    const run: PanelActions['run'] = async (operation, button) => {
+      if (busy || !isCurrent()) return;
+      busy = true;
+      try { await action(operation, button); }
+      finally { busy = false; }
+    };
+    if (panel === 'requests') {
+      const filter = requestFilter;
+      const reload = async (message?: string) => {
+        const { requests } = await request<{ requests: BookingView[] }>(`/admin/requests?status=${filter}`);
+        if (!isCurrent()) return;
+        renderBookingInbox(content, requests, filter, actions, next => { requestFilter = next; showDashboard(); });
+        if (message) banner(message);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      await reload();
+    } else {
+      const invites = request<{ invites: Invite[] }>('/admin/invites');
+      const reload = async (message?: string) => {
+        const [settings, list] = await Promise.all([request<MailSettings>('/admin/mail'), invites]);
+        if (!isCurrent()) return;
+        const overrides = new Set(settings.overrides.map(item => item.inviteId));
+        const now = Date.now();
+        const available = list.invites.flatMap(invite => {
+          const status = invite.revokedAt !== null ? '已撤销' : epoch(invite.expiresAt) <= now ? '已过期' : '';
+          return !status || overrides.has(invite.id) ? [{ id: invite.id, label: status ? `${invite.label} · ${status}` : invite.label }] : [];
+        });
+        renderMailSettings(content, settings, available, actions);
+        if (message) banner(message);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      await reload();
+    }
   }
   function showInvites(invites: Invite[], editing?: Invite) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
     const version = revision;
     const permissions = editing?.permissions ?? { modules: ['profile', 'calendar', 'contact'], modes: ['request', 'direct', 'open'] };
-    content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(editing ? localDate(editing.expiresAt) : defaultExpiry())}" required></label>${permissionsForm(permissions)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。预约功能和个人展示将按后续阶段开放。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
+    content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(editing ? localDate(editing.expiresAt) : defaultExpiry())}" required></label>${permissionsForm(permissions)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。在「邮箱设置」开放预约申请后，勾选「申请时间」的邀请可接收申请。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
     content.querySelector('#cancel-edit')?.addEventListener('click', () => showInvites(invites));
     const list = content.querySelector<HTMLElement>('#invite-list')!;
     if (!invites.length) list.innerHTML = '<p class="admin-empty">还没有邀请。创建第一条链接，选择对方可以看到的内容。</p>';
@@ -676,7 +737,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     const sessionId = me.session.id;
     return new Promise((resolve) => {
       const dialog = document.createElement('dialog'); currentDialog = dialog; dialog.className = 'admin-dialog';
-      dialog.innerHTML = '<h2>再确认一次，是你本人。</h2><p class="admin-copy">这项操作需要系统通行密钥验证，无需填写六位动态码。完成后，刚才填写的内容会保留。</p><div class="admin-copy" role="status" id="reauth-message"></div><form id="reauth-step"><div class="admin-actions"><button class="text-button" id="cancel-reauth" type="button">取消</button><button class="primary" type="submit">使用通行密钥确认身份</button></div></form>';
+      dialog.innerHTML = '<h2>再确认一次，是你本人。</h2><p class="admin-copy">这项操作需要系统通行密钥验证。验证完成后可继续刚才的操作。</p><div class="admin-copy" role="status" id="reauth-message"></div><form id="reauth-step"><div class="admin-actions"><button class="text-button" id="cancel-reauth" type="button">取消</button><button class="primary" type="submit">使用通行密钥确认身份</button></div></form>';
       const isCurrent = () => alive && currentDialog === dialog && dialog.isConnected && me?.session.id === sessionId;
       let busy = false;
       dialog.querySelector('#cancel-reauth')!.addEventListener('click', () => dialog.close());
@@ -736,13 +797,20 @@ export function renderAdmin(root: HTMLElement): () => void {
     finally { checkingSession = false; }
   }
   const visibility = () => { if (!document.hidden) void checkSession(); };
+  const clearMailKey = () => {
+    const input = root.querySelector<HTMLInputElement>('[data-mail-sender] [name="apiKey"]');
+    if (input) input.value = '';
+  };
   document.addEventListener('visibilitychange', visibility);
   window.addEventListener('pageshow', visibility);
+  window.addEventListener('pagehide', clearMailKey);
   const interval = window.setInterval(() => void checkSession(), 45000);
   void initialize();
   return () => {
+    clearMailKey();
     alive = false; controller.abort(); clearPrivate(); setupToken = '';
     window.clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('pageshow', visibility);
+    window.removeEventListener('pagehide', clearMailKey);
     root.replaceChildren();
   };
 }
