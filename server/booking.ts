@@ -217,9 +217,11 @@ export function mountBookings(app: Hono<{ Bindings: Environment }>) {
     if (!canRequest && !canSeeCalendar) throw new AuthError(404, 'NOT_FOUND');
     const requestedWeek = c.req.query('week') ?? '0';
     if (!/^\d{1,2}$/.test(requestedWeek)) throw new AuthError(400, 'INVALID_INPUT');
-    const canSubmit = invitation.kind === 'invite' && canRequest && await requestMailReady(c);
     const week = requestWeek(now, Number(requestedWeek), canRequest);
-    const days = canSeeCalendar && permissions.modules.includes('travel') ? await withCalendarCities(c, week.days, now) : week.days;
+    const [canSubmit, days] = await Promise.all([
+      invitation.kind === 'invite' && canRequest && requestMailReady(c),
+      canSeeCalendar && permissions.modules.includes('travel') ? withCalendarCities(c, week.days, now) : week.days,
+    ]);
     return c.json({ ...week, days, canSubmit });
   });
 

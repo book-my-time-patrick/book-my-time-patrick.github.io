@@ -1,5 +1,5 @@
 import './invitation-booking.css';
-import { bookingDate, isRequestSlot, parseEmailAddress, REQUEST_DURATIONS } from '../../shared/booking';
+import { bookingDate, isRequestSlot, parseEmailAddress, requestWeek, REQUEST_DURATIONS } from '../../shared/booking';
 import type { SlotState } from '../../shared/booking';
 import { copyText, escapeHtml as e } from './ui';
 
@@ -7,11 +7,11 @@ interface Slot { startAt: number; state: SlotState }
 interface Day { date: string; slots: Slot[]; city?: string }
 interface Week {
   now: number; week: number; maxWeek: number; weekStart: string; canSubmit: boolean;
-  days: Day[]; durations: number[];
+  days: Day[]; durations: readonly number[];
 }
 interface Options {
   showCalendar: boolean; showCity: boolean; allowRequest: boolean; preview: boolean;
-  send: (path: string, body?: object) => Promise<unknown>;
+  send: (path: string, body?: object, signal?: AbortSignal) => Promise<unknown>;
   unavailable: () => void;
 }
 
@@ -136,10 +136,12 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   let alive = true;
   let week: Week | undefined;
   let readAt = 0;
-  let loading = false;
+  let weekRequest: AbortController | undefined;
+  let weekVerified = false;
   let submitting = false;
   let submitted = false;
-  let view: 'week' | 'day' = showCalendar && window.matchMedia('(max-width: 640px)').matches ? 'day' : 'week';
+  const compactWeek = window.matchMedia('(max-width: 640px)');
+  let view: 'week' | 'day' = showCalendar && compactWeek.matches ? 'day' : 'week';
   let visibleDay = '';
   let selectedDate = '';
   let selectedStart = 0;
@@ -165,19 +167,26 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const unit = view === 'day' ? '天' : '周';
     previous.setAttribute('aria-label', `上一${unit}`);
     next.setAttribute('aria-label', `下一${unit}`);
-    previous.disabled = loading || submitting || !week || (week.week === 0 && (view === 'week' || index <= 0));
-    next.disabled = loading || submitting || !week || (week.week === week.maxWeek && (view === 'week' || index === week.days.length - 1));
+    previous.disabled = submitting || !week || (week.week === 0 && (view === 'week' || index <= 0));
+    next.disabled = submitting || !week || (week.week === week.maxWeek && (view === 'week' || index === week.days.length - 1));
     for (const button of viewButtons) {
       button.setAttribute('aria-pressed', String(button.dataset.calendarView === view));
       button.disabled = submitting;
     }
-    calendar?.setAttribute('aria-busy', String(loading));
+    calendar?.setAttribute('aria-busy', String(!week && Boolean(weekRequest)));
     if (fieldset) fieldset.disabled = submitting;
     if (submitButton) {
-      submitButton.disabled = loading || submitting || !week?.canSubmit || preview || submitted;
+      submitButton.disabled = !weekVerified || submitting || !week?.canSubmit || preview || submitted;
       submitButton.textContent = submitting ? '正在提交…' : '提交申请';
     }
-    if (requestState) requestState.textContent = preview ? '当前为预览，无法提交申请。' : week && !week.canSubmit ? '邀请人暂未开启在线申请。可复制申请文字发给对方。' : '申请不占位，请等待邀请人确认。';
+    if (requestState) {
+      let notice = '申请不占位，请等待邀请人确认。';
+      if (preview) notice = '当前为预览，无法提交申请。';
+      else if (weekRequest) notice = '正在确认在线申请权限。';
+      else if (!weekVerified) notice = '暂时无法确认在线申请权限。可复制申请文字发给对方。';
+      else if (!week?.canSubmit) notice = '邀请人暂未开启在线申请。可复制申请文字发给对方。';
+      requestState.textContent = notice;
+    }
   }
 
   function syncForm() {
@@ -227,7 +236,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   function cityOf(day: Day) {
-    return showCity && day.date >= bookingDate(now()) && typeof day.city === 'string' ? day.city.trim() : '';
+    return weekVerified && showCity && day.date >= bookingDate(now()) && typeof day.city === 'string' ? day.city.trim() : '';
   }
 
   function weekLocations(days: Day[]) {
@@ -294,28 +303,33 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       </div>${selection}`;
       return;
     }
+    if (compactWeek.matches) {
+      const overview = days.map((day, index) => {
+        const city = cityOf(day);
+        const base = dayStart(day.date);
+        const segments = Array.from({ length: 12 }, (_, hour) => {
+          const first = base + 2 * hour * step;
+          const halfHours = [first, first + step];
+          if (halfHours.some(start => inSelection(start))) return 'selected';
+          const states = halfHours.map(start => stateAt(day, start));
+          return states.includes('request') ? 'request' : states.every(state => state === 'expired') ? 'expired' : 'unavailable';
+        });
+        const state = segments.includes('request') || segments.includes('selected') ? '可申请' : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
+        const title = `${weekdays[index]} ${shortDate(day.date)} ${state}${city ? ` ${city}` : ''}，查看当天`;
+        return `<button type="button" data-open-day="${e(day.date)}" aria-label="${e(title)}"${current(day)}>
+          <span class="booking-overview-date"><strong>${weekdays[index]}</strong>${shortDate(day.date)}${day.date === today ? ' · 今天' : ''}</span>
+          <span class="booking-overview-detail">${city ? `<span class="booking-location-label">${pin}<span>${e(city)}</span></span>` : ''}<span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span></span>
+          <span class="booking-overview-state">${state}<span aria-hidden="true">›</span></span>
+        </button>`;
+      }).join('');
+      calendar.innerHTML = `<div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${selection}`;
+      return;
+    }
+    const starts = days.map(day => dayStart(day.date));
     const rows = Array.from({ length: 24 }, (_, row) => {
       const hour = row % 2 === 0;
-      const clock = time(dayStart(days[0].date) + row * step);
-      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${days.map(day => `<td${day.date === today ? ' class="booking-today-column"' : ''}>${slotMarkup(day, dayStart(day.date) + row * step)}</td>`).join('')}</tr>`;
-    }).join('');
-    const overview = days.map((day, index) => {
-      const city = cityOf(day);
-      const base = dayStart(day.date);
-      const segments = Array.from({ length: 12 }, (_, hour) => {
-        const first = base + 2 * hour * step;
-        const halfHours = [first, first + step];
-        if (halfHours.some(start => inSelection(start))) return 'selected';
-        const states = halfHours.map(start => stateAt(day, start));
-        return states.includes('request') ? 'request' : states.every(state => state === 'expired') ? 'expired' : 'unavailable';
-      });
-      const state = segments.includes('request') || segments.includes('selected') ? '可申请' : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
-      const title = `${weekdays[index]} ${shortDate(day.date)} ${state}${city ? ` ${city}` : ''}，查看当天`;
-      return `<button type="button" data-open-day="${e(day.date)}" aria-label="${e(title)}"${current(day)}>
-        <span class="booking-overview-date"><strong>${weekdays[index]}</strong>${shortDate(day.date)}${day.date === today ? ' · 今天' : ''}</span>
-        <span class="booking-overview-detail">${city ? `<span class="booking-location-label">${pin}<span>${e(city)}</span></span>` : ''}<span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span></span>
-        <span class="booking-overview-state">${state}<span aria-hidden="true">›</span></span>
-      </button>`;
+      const clock = time(starts[0] + row * step);
+      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${days.map((day, index) => `<td${day.date === today ? ' class="booking-today-column"' : ''}>${slotMarkup(day, starts[index] + row * step)}</td>`).join('')}</tr>`;
     }).join('');
     calendar.innerHTML = `
       <table class="booking-week-grid" aria-label="工作日九点至二十一点的申请时段">
@@ -323,38 +337,61 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
           <button type="button" data-open-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}，查看当天"${current(day)}>${dayLabel(day, index)}${day.date === today ? '<span class="booking-today-label">今天</span>' : ''}</button>
         </th>`).join('')}</tr>${weekLocations(days)}</thead>
         <tbody>${rows}</tbody>
-      </table>
-      <div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${selection}`;
+      </table>${selection}`;
   }
 
   function syncSelection() { syncForm(); drawCalendar(); updateControls(); }
 
+  function setWeek(data: Week, edge?: 'first' | 'last') {
+    const sameWeek = week?.weekStart === data.weekStart;
+    const focused = sameWeek ? calendar?.querySelector('button:focus') : undefined;
+    const focusKey = focused?.getAttributeNames().find(name => name.startsWith('data-'));
+    if (!sameWeek) {
+      selectedDate = '';
+      selectedStart = 0;
+      visibleDay = edge ? data.days[edge === 'first' ? 0 : data.days.length - 1].date : '';
+    }
+    week = data;
+    readAt = performance.now();
+    lastTick = Math.floor(now() / step);
+    syncSelection();
+    if (focused && focusKey) {
+      const value = CSS.escape(focused.getAttribute(focusKey)!);
+      calendar?.querySelector<HTMLButtonElement>(`button[${focusKey}="${value}"]`)?.focus({ preventScroll: true });
+    }
+  }
+
   async function loadWeek(offset: number, edge?: 'first' | 'last') {
-    if (!alive || loading || submitting) return;
-    loading = true;
-    feedback.textContent = '正在读取周历…';
-    updateControls();
+    if (!alive || submitting) return;
+    weekRequest?.abort();
+    const request = new AbortController();
+    weekRequest = request;
+    weekVerified = false;
+    feedback.textContent = week ? '正在核对本周信息…' : '正在读取周历…';
+    if (week) {
+      const generic = requestWeek(Math.floor(now()), offset, allowRequest);
+      setWeek({ ...generic, canSubmit: false }, edge);
+    } else updateControls();
     try {
-      const data = readWeek(await send(`/invite/calendar?week=${offset}`));
-      if (!alive) return;
-      if (week && week.weekStart !== data.weekStart) { selectedDate = ''; selectedStart = 0; visibleDay = ''; }
-      week = data;
-      if (edge) visibleDay = data.days[edge === 'first' ? 0 : data.days.length - 1].date;
-      readAt = performance.now();
-      lastTick = Math.floor(now() / step);
+      const response = await send(`/invite/calendar?week=${offset}`, undefined, request.signal);
+      if (!alive || weekRequest !== request) return;
+      const data = readWeek(response);
+      weekVerified = true;
       feedback.textContent = '';
-      syncSelection();
+      setWeek(data, edge);
     } catch (error) {
-      if (!alive) return;
+      if (!alive || weekRequest !== request) return;
       if (error instanceof InvitationError && [401, 403, 404].includes(error.status)) { unavailable(); return; }
-      feedback.textContent = '暂时无法读取周历。';
+      feedback.textContent = week ? '暂时无法核对本周信息，已显示基础时段。' : '暂时无法读取周历。';
       const retry = document.createElement('button');
       retry.type = 'button'; retry.className = 'text-button'; retry.textContent = '重试';
       retry.addEventListener('click', () => void loadWeek(offset, edge));
       feedback.append(retry);
     } finally {
-      loading = false;
-      if (alive) updateControls();
+      if (weekRequest === request) {
+        weekRequest = undefined;
+        if (alive) updateControls();
+      }
     }
   }
 
@@ -375,7 +412,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   function move(delta: -1 | 1) {
-    if (!week || loading || submitting) return;
+    if (!week || submitting) return;
     if (view === 'day') {
       const day = week.days[week.days.findIndex(item => item.date === visibleDay) + delta];
       if (day) { showDay(day.date); return; }
@@ -392,7 +429,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     updateControls();
   });
   calendar?.addEventListener('click', event => {
-    if (loading || submitting) return;
+    if (submitting) return;
     const target = (event.target as Element).closest<HTMLButtonElement>('button');
     if (!target) return;
     const date = target.dataset.day ?? target.dataset.openDay;
@@ -428,7 +465,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   async function submitAttempt(draft: ReturnType<typeof readDraft>, submissionId: string) {
-    if (!alive || !form || !week || loading || submitting || submitted) return;
+    if (!alive || !form || !week || !weekVerified || submitting || submitted) return;
     submitting = true;
     let refreshWeek: number | undefined;
     showRequestMessage('正在提交申请…');
@@ -476,7 +513,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   form?.addEventListener('submit', event => {
     event.preventDefault();
-    if (!allowRequest || preview || !week?.canSubmit || loading || submitting || submitted) return;
+    if (!allowRequest || preview || !week?.canSubmit || !weekVerified || submitting || submitted) return;
     if (!hasValidSelection()) { syncSelection(); showRequestMessage('请选择仍可申请的日期、时间和时长。', true); return; }
     const draft = readDraft();
     const email = parseEmailAddress(draft.email);
@@ -509,17 +546,22 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   });
 
   function refreshClock() {
-    if (!alive || !week || loading || submitting || document.hidden) return;
+    if (!alive || !week || submitting || document.hidden) return;
     if (week.days.at(-1)!.date < bookingDate(now())) { void loadWeek(0); return; }
     const tick = Math.floor(now() / step);
     if (tick !== lastTick) { lastTick = tick; syncSelection(); }
   }
+  const redrawWeek = () => { if (view === 'week') drawCalendar(); };
+  if (showCalendar) compactWeek.addEventListener('change', redrawWeek);
   const timer = window.setInterval(refreshClock, 30_000);
   document.addEventListener('visibilitychange', refreshClock);
   void loadWeek(0);
   return () => {
     alive = false;
+    weekRequest?.abort();
+    weekRequest = undefined;
     lastSubmission = undefined;
+    if (showCalendar) compactWeek.removeEventListener('change', redrawWeek);
     window.clearInterval(timer);
     document.removeEventListener('visibilitychange', refreshClock);
   };

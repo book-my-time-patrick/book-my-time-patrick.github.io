@@ -14,12 +14,13 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
   let alive = true;
   let localToken = token;
   let disposeBooking: (() => void) | undefined;
-  async function send(path: string, body?: object): Promise<unknown> {
+  async function send(path: string, body?: object, signal?: AbortSignal): Promise<unknown> {
     if (!__API_BASE_URL__) throw new Error('API unavailable');
     const request = new AbortController();
     const abort = () => request.abort();
-    if (controller.signal.aborted) abort();
+    if (controller.signal.aborted || signal?.aborted) abort();
     controller.signal.addEventListener('abort', abort, { once: true });
+    signal?.addEventListener('abort', abort, { once: true });
     const timeout = window.setTimeout(abort, 20_000);
     try {
       const response = await fetch(`${__API_BASE_URL__}${path}`, {
@@ -37,6 +38,7 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
     } finally {
       window.clearTimeout(timeout);
       controller.signal.removeEventListener('abort', abort);
+      signal?.removeEventListener('abort', abort);
     }
   }
   function unavailable() {
