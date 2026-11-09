@@ -5,7 +5,7 @@ import { escapeHtml as e, formatTime, moduleNames } from './ui';
 interface Invitation {
   preview: boolean;
   expiresAt: string | number;
-  permissions: { modules: string[]; modes: string[] };
+  permissions: { modules: string[]; modes: string[]; hideBusy?: boolean };
   profile: { displayName: string };
 }
 
@@ -57,6 +57,7 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
       const showCalendar = invitation.permissions.modules.includes('calendar');
       const showCity = showCalendar && invitation.permissions.modules.includes('travel');
       const allowRequest = invitation.permissions.modes.includes('request');
+      const allowDirect = showCalendar && invitation.permissions.modes.includes('direct');
       const showBooking = showCalendar || allowRequest;
       const modules = invitation.permissions.modules.filter(name => name !== 'calendar' && !(showCity && name === 'travel') && Object.hasOwn(moduleNames, name));
       const displayName = invitation.profile.displayName ? `${e(invitation.profile.displayName)} 的预约空间。` : '';
@@ -71,7 +72,8 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
       </main>`;
       if (showBooking) {
         disposeBooking = renderInvitationBooking(root.querySelector<HTMLElement>('#invitation-booking')!, {
-          showCalendar, showCity, allowRequest, preview: invitation.preview, send, unavailable,
+          showCalendar, showCity, hideBusy: invitation.permissions.hideBusy === true, allowRequest, allowDirect,
+          preview: invitation.preview, send, unavailable,
         });
       }
     } catch (error) {

@@ -61,13 +61,14 @@ async function encryptionKey(encoded: string): Promise<CryptoKey> {
   if (bytes.length !== 32) throw new Error('Invalid key');
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
-export async function encryptSecret(secret: string, encodedKey: string, purpose: 'totp' | 'mail-api-key' = 'totp'): Promise<string> {
+type SecretPurpose = 'totp' | 'mail-api-key' | 'calendar-icloud' | 'calendar-outlook' | 'calendar-oauth';
+export async function encryptSecret(secret: string, encodedKey: string, purpose: SecretPurpose = 'totp'): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await encryptionKey(encodedKey);
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: encoder.encode(`invited-booking:${purpose}:v1`) }, key, encoder.encode(secret));
   return `v1.${base64url(iv)}.${base64url(new Uint8Array(encrypted))}`;
 }
-export async function decryptSecret(encoded: string, encodedKey: string, purpose: 'totp' | 'mail-api-key' = 'totp'): Promise<string> {
+export async function decryptSecret(encoded: string, encodedKey: string, purpose: SecretPurpose = 'totp'): Promise<string> {
   const [version, iv, ciphertext, extra] = encoded.split('.');
   if (version !== 'v1' || !iv || !ciphertext || extra) throw new Error('Invalid ciphertext');
   const key = await encryptionKey(encodedKey);

@@ -29,23 +29,26 @@ function fold(line: string): string {
 export function calendarFile(event: {
   uid: string; organizer: string; recipient: string; summary: string;
   startAt: number; endAt: number; stamp: number; sequence: number; status: CalendarStatus;
+  request?: boolean;
 }): string {
   const cancel = event.status === 'CANCELLED';
+  const method = cancel ? 'CANCEL' : event.request ? 'REQUEST' : 'PUBLISH';
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Private Appointments//Booking//EN',
-    `METHOD:${cancel ? 'CANCEL' : 'PUBLISH'}`, 'BEGIN:VEVENT',
+    `METHOD:${method}`, 'BEGIN:VEVENT',
     `UID:${text(event.uid)}`, `DTSTAMP:${utc(event.stamp)}`,
     `DTSTART:${utc(event.startAt)}`, `DTEND:${utc(event.endAt)}`,
     `ORGANIZER:${mailto(event.organizer)}`, `SUMMARY:${text(event.summary)}`,
     `STATUS:${event.status}`, `SEQUENCE:${event.sequence}`, 'CLASS:PRIVATE',
     `TRANSP:${event.status === 'CONFIRMED' ? 'OPAQUE' : 'TRANSPARENT'}`,
   ];
-  if (cancel) lines.push(`ATTENDEE:${mailto(event.recipient)}`);
+  if (method !== 'PUBLISH') lines.push(`ATTENDEE:${mailto(event.recipient)}`);
   lines.push('END:VEVENT', 'END:VCALENDAR');
   return `${lines.map(fold).join('\r\n')}\r\n`;
 }
 
-export function calendarAttachment(content: string) {
+export function calendarAttachment(content: string, method?: 'REQUEST' | 'CANCEL') {
   const bytes = encoder.encode(content);
-  return { filename: 'appointment.ics', content: btoa(String.fromCharCode(...bytes)), content_type: 'text/calendar' };
+  return { filename: 'appointment.ics', content: btoa(String.fromCharCode(...bytes)),
+    content_type: method ? `text/calendar; method=${method}; charset=UTF-8` : 'text/calendar' };
 }

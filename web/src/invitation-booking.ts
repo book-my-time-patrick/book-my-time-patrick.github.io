@@ -3,14 +3,18 @@ import { bookingDate, isRequestSlot, parseEmailAddress, requestWeek, REQUEST_DUR
 import type { SlotState } from '../../shared/booking';
 import { copyText, escapeHtml as e } from './ui';
 
-interface Slot { startAt: number; state: SlotState }
+type Availability = 'available' | 'busy' | 'blocked';
+type BookingMode = 'request' | 'direct';
+type CalendarState = SlotState | Exclude<Availability, 'blocked'>;
+interface Slot { startAt: number; state: SlotState; availability?: Availability; bookableDurations?: number[] }
 interface Day { date: string; slots: Slot[]; city?: string }
 interface Week {
   now: number; week: number; maxWeek: number; weekStart: string; canSubmit: boolean;
   days: Day[]; durations: readonly number[];
+  availability?: 'ready' | 'unavailable'; canBook?: boolean; validUntil?: number;
 }
 interface Options {
-  showCalendar: boolean; showCity: boolean; allowRequest: boolean; preview: boolean;
+  showCalendar: boolean; showCity: boolean; hideBusy: boolean; allowRequest: boolean; allowDirect: boolean; preview: boolean;
   send: (path: string, body?: object, signal?: AbortSignal) => Promise<unknown>;
   unavailable: () => void;
 }
@@ -23,7 +27,9 @@ const minute = 60_000;
 const step = 30 * minute;
 const chinaOffset = 8 * 60 * minute;
 const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-const stateNames: Record<SlotState, string> = { expired: '已过期', request: '可申请', unavailable: '未开放' };
+const stateNames: Record<CalendarState, string> = { expired: '已过期', request: '可申请', unavailable: '未开放', available: '空闲', busy: '已占用' };
+const baseStates = ['expired', 'request', 'unavailable'];
+const isDuration = (duration: number) => REQUEST_DURATIONS.some(length => length === duration);
 const time = (instant: number) => new Date(instant + chinaOffset).toISOString().slice(11, 16);
 const shortDate = (date: string) => `${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日`;
 const dateNumber = (date: string) => Number(date.slice(8, 10));
@@ -35,22 +41,29 @@ function readWeek(value: unknown): Week {
   if (!data || !Number.isSafeInteger(data.now) || !Number.isInteger(data.week) || !Number.isInteger(data.maxWeek)
     || data.week < 0 || data.week > data.maxWeek || data.maxWeek > 6 || typeof data.canSubmit !== 'boolean'
     || !Array.isArray(data.days) || data.days.length !== 7 || !Array.isArray(data.durations)
-    || !data.durations.length || data.durations.some(duration => !REQUEST_DURATIONS.some(length => length === duration))) {
+    || !data.durations.length || data.durations.some(duration => !isDuration(duration))
+    || (data.availability !== undefined && !['ready', 'unavailable'].includes(data.availability))
+    || (data.canBook !== undefined && typeof data.canBook !== 'boolean')
+    || (data.validUntil !== undefined && !Number.isSafeInteger(data.validUntil))) {
     throw new Error('Invalid calendar');
   }
   for (const day of data.days) {
     if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day.date) || !Number.isFinite(dayStart(day.date))
       || !Array.isArray(day.slots) || day.slots.length > 24
-      || day.slots.some(slot => !slot || !Number.isSafeInteger(slot.startAt) || !Object.hasOwn(stateNames, slot.state)
+      || day.slots.some(slot => !slot || !Number.isSafeInteger(slot.startAt) || !baseStates.includes(slot.state)
         || slot.startAt < dayStart(day.date) || slot.startAt >= dayStart(day.date) + 24 * step
-        || slot.startAt % step !== 0)) throw new Error('Invalid calendar day');
+        || slot.startAt % step !== 0
+        || (slot.availability !== undefined && !['available', 'busy', 'blocked'].includes(slot.availability))
+        || (slot.bookableDurations !== undefined && (!Array.isArray(slot.bookableDurations)
+          || slot.bookableDurations.some(duration => !isDuration(duration)))))) throw new Error('Invalid calendar day');
   }
   if (data.weekStart !== data.days[0].date) throw new Error('Invalid week start');
   return data;
 }
 
 export function renderInvitationBooking(root: HTMLElement, options: Options): () => void {
-  const { showCalendar, showCity, allowRequest, preview, send, unavailable } = options;
+  const { showCalendar, showCity, hideBusy, allowRequest, allowDirect, preview, send, unavailable } = options;
+  const hasForm = allowRequest || allowDirect;
   const navigation = `<div class="booking-period-nav" aria-label="切换日期范围" role="group">
     <button class="secondary booking-nav-arrow" type="button" data-calendar-step="-1" aria-label="上一周" disabled><span aria-hidden="true">‹</span></button>
     <div class="booking-period" aria-live="polite">
@@ -72,19 +85,25 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       ${navigation}
       ${weekFeedback}
       <div class="booking-legend" aria-label="周历图例">
-        <span><i class="booking-key request" aria-hidden="true"></i>可申请</span>
-        ${allowRequest ? '<span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
+        <span data-legend-request><i class="booking-key request" aria-hidden="true"></i>可申请</span>
+        <span data-legend-availability hidden><i class="booking-key available" aria-hidden="true"></i>空闲</span>
+        ${hideBusy ? '' : '<span data-legend-availability hidden><i class="booking-key busy" aria-hidden="true"></i>已占用</span>'}
+        ${hasForm ? '<span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
         <span><i class="booking-key expired" aria-hidden="true"></i>已过期</span>
         <span><i class="booking-key unavailable" aria-hidden="true">–</i>未开放</span>
         <span class="booking-legend-zone">UTC+8</span>
       </div>
       <div data-calendar class="booking-calendar" aria-busy="true"></div>
-      <p class="booking-caption">「可申请」表示可提出的时间。实际能否见面由邀请人确认。</p>
+      <p class="booking-caption" data-calendar-caption>「可申请」表示可提出的时间。实际能否见面由邀请人确认。</p>
     </section>` : ''}
-    ${allowRequest ? `<section class="invitation-card booking-card" aria-labelledby="booking-request-title">
-      <div class="booking-section-head"><div><p class="eyebrow">PROPOSE A TIME</p><h2 id="booking-request-title" tabindex="-1">预约其他时间</h2></div><span class="booking-zone">待邀请人确认</span></div>
+    ${hasForm ? `<section class="invitation-card booking-card" data-booking-actions aria-labelledby="booking-request-title"${allowRequest ? '' : ' hidden'}>
+      <div class="booking-section-head"><div><p class="eyebrow">BOOK A TIME</p><h2 id="booking-request-title" tabindex="-1">预约其他时间</h2></div><span class="booking-zone" data-mode-note>待邀请人确认</span></div>
       ${showCalendar ? '' : navigation + weekFeedback}
-      <p class="booking-caption">请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。</p>
+      ${allowRequest && allowDirect ? `<div class="booking-view-toggle booking-mode-toggle" data-booking-modes role="group" aria-label="预约方式" hidden>
+        <button type="button" data-booking-mode="request" aria-pressed="true">邮件申请</button>
+        <button type="button" data-booking-mode="direct" aria-pressed="false">直接预约</button>
+      </div>` : ''}
+      <p class="booking-caption" data-mode-caption>请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。</p>
       <div data-request-content>
         <form class="booking-form" method="post">
           <fieldset class="booking-fields">
@@ -121,6 +140,15 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const previous = root.querySelector<HTMLButtonElement>('[data-calendar-step="-1"]')!;
   const next = root.querySelector<HTMLButtonElement>('[data-calendar-step="1"]')!;
   const viewButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-calendar-view]')];
+  const actionCard = root.querySelector<HTMLElement>('[data-booking-actions]');
+  const actionTitle = root.querySelector<HTMLElement>('#booking-request-title');
+  const modeToggle = root.querySelector<HTMLElement>('[data-booking-modes]');
+  const modeButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-booking-mode]')];
+  const modeNote = root.querySelector<HTMLElement>('[data-mode-note]');
+  const modeCaption = root.querySelector<HTMLElement>('[data-mode-caption]');
+  const calendarCaption = root.querySelector<HTMLElement>('[data-calendar-caption]');
+  const requestLegend = root.querySelector<HTMLElement>('[data-legend-request]');
+  const availabilityLegend = root.querySelectorAll<HTMLElement>('[data-legend-availability]');
   const form = root.querySelector<HTMLFormElement>('form');
   const dateField = form?.querySelector<HTMLSelectElement>('[name="date"]');
   const timeField = form?.querySelector<HTMLSelectElement>('[name="startAt"]');
@@ -132,12 +160,16 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const visitorTime = root.querySelector<HTMLElement>('[data-visitor-time]');
   const message = root.querySelector<HTMLElement>('[data-request-message]');
   const manualCopy = root.querySelector<HTMLElement>('[data-manual-copy]');
+  const copyButton = root.querySelector<HTMLButtonElement>('[data-copy-request]');
 
   let alive = true;
   let week: Week | undefined;
   let readAt = 0;
   let weekRequest: AbortController | undefined;
   let weekVerified = false;
+  let expiryTimer: number | undefined;
+  let directOffered = false;
+  let mode: BookingMode = allowRequest ? 'request' : 'direct';
   let submitting = false;
   let submitted = false;
   const compactWeek = window.matchMedia('(max-width: 640px)');
@@ -146,13 +178,28 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   let selectedDate = '';
   let selectedStart = 0;
   let selectedDuration = 60;
-  let lastSubmission: { body: string; id: string } | undefined;
+  const lastSubmissions: Partial<Record<BookingMode, { body: string; id: string }>> = {};
   let lastTick = 0;
 
   const now = () => week ? week.now + performance.now() - readAt : Date.now();
-  const isRequest = (slot: Slot) => slot.state === 'request' && slot.startAt > now();
-  const availableSlots = (day: Day | undefined) => day?.slots.filter(isRequest) ?? [];
-  const durations = () => (week?.durations ?? []).filter(length => !selectedStart || isRequestSlot(selectedStart, length, now()));
+  const availabilityReady = () => showCalendar && weekVerified && (week?.availability === 'ready' || week?.canBook === true)
+    && (week.validUntil === undefined || now() < week.validUntil);
+  const directSelectable = () => allowDirect && availabilityReady() && (preview || week?.canBook === true);
+  const canChoose = (slot: Slot) => slot.startAt > now() && (mode === 'request'
+    ? allowRequest && slot.state === 'request'
+    : directSelectable() && slot.availability === 'available' && Boolean(slot.bookableDurations?.length));
+  const availableSlots = (day: Day | undefined) => day?.slots.filter(canChoose) ?? [];
+  const canSubmitCurrentMode = () => weekVerified && (mode === 'request' ? allowRequest && week?.canSubmit : allowDirect && availabilityReady() && week?.canBook);
+  function durations() {
+    const lengths = week?.durations ?? [];
+    if (mode === 'direct') {
+      if (!directSelectable()) return [];
+      if (!selectedStart) return lengths;
+      const slot = week?.days.find(day => day.date === selectedDate)?.slots.find(item => item.startAt === selectedStart);
+      return lengths.filter(length => slot?.bookableDurations?.includes(length));
+    }
+    return lengths.filter(length => !selectedStart || isRequestSlot(selectedStart, length, now()));
+  }
   const hasValidSelection = () => selectedStart > now() && durations().includes(selectedDuration)
     && availableSlots(week?.days.find(day => day.date === selectedDate)).some(slot => slot.startAt === selectedStart);
 
@@ -173,24 +220,51 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       button.setAttribute('aria-pressed', String(button.dataset.calendarView === view));
       button.disabled = submitting;
     }
+    if (actionCard) actionCard.hidden = !allowRequest && !directOffered;
+    if (modeToggle) modeToggle.hidden = !directOffered || submitted;
+    for (const button of modeButtons) {
+      button.setAttribute('aria-pressed', String(button.dataset.bookingMode === mode));
+      button.disabled = submitting;
+    }
+    const direct = mode === 'direct';
+    if (actionTitle) actionTitle.textContent = direct ? '直接预约' : '预约其他时间';
+    if (modeNote) modeNote.textContent = direct ? '提交后立即确认' : '待邀请人确认';
+    if (modeCaption) modeCaption.textContent = direct
+      ? '请选择空闲时段（UTC+8），并留下收取预约确认的邮箱。'
+      : '请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。';
+    if (calendarCaption) calendarCaption.textContent = availabilityReady()
+      ? `日历仅显示时间状态。${allowRequest ? '也可通过邮件申请其他时间。' : ''}`
+      : allowRequest ? '「可申请」表示可提出的时间。实际能否见面由邀请人确认。'
+      : weekRequest ? '正在核对空闲时段。' : '目前没有可显示的空闲时段。';
+    if (requestLegend) requestLegend.hidden = availabilityReady() || !allowRequest;
+    for (const item of availabilityLegend) item.hidden = !availabilityReady();
     calendar?.setAttribute('aria-busy', String(!week && Boolean(weekRequest)));
     if (fieldset) fieldset.disabled = submitting;
     if (submitButton) {
-      submitButton.disabled = !weekVerified || submitting || !week?.canSubmit || preview || submitted;
-      submitButton.textContent = submitting ? '正在提交…' : '提交申请';
+      submitButton.disabled = !canSubmitCurrentMode() || submitting || preview || submitted;
+      submitButton.textContent = submitting ? '正在提交…' : direct ? '确认预约' : '提交申请';
     }
+    if (copyButton) copyButton.hidden = direct;
+    if (direct && manualCopy) manualCopy.hidden = true;
     if (requestState) {
-      let notice = '申请不占位，请等待邀请人确认。';
-      if (preview) notice = '当前为预览，无法提交申请。';
-      else if (weekRequest) notice = '正在确认在线申请权限。';
-      else if (!weekVerified) notice = '暂时无法确认在线申请权限。可复制申请文字发给对方。';
-      else if (!week?.canSubmit) notice = '邀请人暂未开启在线申请。可复制申请文字发给对方。';
+      let notice = direct ? '提交成功后，预约立即生效。' : '申请不占位，请等待邀请人确认。';
+      if (preview) notice = '当前为预览，无法提交。';
+      else if (weekRequest) notice = direct ? '正在核对空闲时段。' : '正在确认在线申请权限。';
+      else if (!canSubmitCurrentMode()) notice = direct ? '暂时无法直接预约。' : weekVerified
+        ? '邀请人暂未开启在线申请。可复制申请文字发给对方。'
+        : '暂时无法确认在线申请权限。可复制申请文字发给对方。';
       requestState.textContent = notice;
     }
   }
 
   function syncForm() {
     if (!week || !dateField || !timeField || !durationField || submitted) return;
+    if (mode === 'direct' && !weekVerified && selectedStart) {
+      dateField.disabled = true;
+      timeField.disabled = true;
+      durationField.disabled = true;
+      return;
+    }
     const dates = week.days.filter(day => availableSlots(day).length);
     if (!dates.some(day => day.date === selectedDate)) selectedDate = '';
     const slots = availableSlots(dates.find(day => day.date === selectedDate));
@@ -262,28 +336,43 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     visibleDay = currentDay.date;
     drawPeriod(currentDay);
     if (!calendar) return;
+    const slots = new Map(days.flatMap(day => day.slots.map(slot => [slot.startAt, slot] as const)));
+    const showAvailability = availabilityReady();
     const selectedEnd = selectedStart + selectedDuration * minute;
-    const stateAt = (day: Day, startAt: number): SlotState => {
-      const slot = day.slots.find(candidate => candidate.startAt === startAt);
-      return startAt <= instant ? 'expired' : slot?.state ?? 'unavailable';
+    const stateAt = (startAt: number): CalendarState => {
+      const slot = slots.get(startAt);
+      if (startAt <= instant || slot?.state === 'expired') return 'expired';
+      if (showAvailability && slot?.availability) {
+        return slot.availability === 'blocked' || (slot.availability === 'busy' && hideBusy) ? 'unavailable' : slot.availability;
+      }
+      return slot?.state ?? 'unavailable';
     };
-    const inSelection = (startAt: number) => Boolean(selectedStart && startAt >= selectedStart && startAt < selectedEnd);
-    const slotMarkup = (day: Day, startAt: number, dayView = false) => {
-      const state = stateAt(day, startAt);
-      const selected = state === 'request' && inSelection(startAt);
+    const showSelection = Boolean(selectedStart && (mode !== 'direct' || showAvailability));
+    const inSelection = (startAt: number) => showSelection && startAt >= selectedStart && startAt < selectedEnd;
+    const slotMarkup = (day: Day, startAt: number, row: number, dayView = false) => {
+      const slot = slots.get(startAt);
+      const state = stateAt(startAt);
+      const chosen = Boolean(slot && canChoose(slot) && !submitted);
+      const selected = state !== 'expired' && inSelection(startAt);
       const first = selected && startAt === selectedStart;
       const last = selected && startAt + step >= selectedEnd;
-      const label = `${shortDate(day.date)} ${time(startAt)} ${selected ? '已选择' : stateNames[state]}`;
-      const contents = dayView || (state === 'request' && (!selected || first)) ? time(startAt) : state === 'unavailable' ? '–' : '';
-      const classes = `booking-slot ${state}${selected ? ' selected' : ''}${first ? ' selection-first' : ''}${last ? ' selection-last' : ''}`;
-      return state === 'request' && allowRequest && !submitted
-        ? `<button class="${classes}" type="button" data-slot="${startAt}" aria-label="${label}" aria-pressed="${first}">${contents}${first ? '<span aria-hidden="true">✓</span>' : ''}</button>`
+      const status = selected ? '已选择' : stateNames[state];
+      const action = chosen && !selected && mode === 'request' && state !== 'request' ? '，可发邮件申请' : '';
+      const label = `${shortDate(day.date)} ${time(startAt)} ${status}${action}`;
+      const check = first ? '<span aria-hidden="true">✓</span>' : '';
+      const contents = dayView ? `<span>${time(startAt)}${check}</span><small>${status}</small>`
+        : (first || (!selected && (state === 'request' || state === 'available' || (chosen && state === 'unavailable'))) ? time(startAt) : '') + check;
+      const joinBefore = !dayView && !selected && row > 0 && !inSelection(startAt - step) && stateAt(startAt - step) === state;
+      const joinAfter = !dayView && !selected && row < 23 && !inSelection(startAt + step) && stateAt(startAt + step) === state;
+      const classes = `booking-slot ${state}${selected ? ' selected' : ''}${first ? ' selection-first' : ''}${last ? ' selection-last' : ''}${joinBefore ? ' joins-before' : ''}${joinAfter ? ' joins-after' : ''}`;
+      return chosen
+        ? `<button class="${classes}" type="button" data-slot="${startAt}" aria-label="${label}" aria-pressed="${first}">${contents}</button>`
         : `<span class="${classes}" role="img" aria-label="${label}">${contents}</span>`;
     };
     const dayLabel = (day: Day, index: number) => `<span class="booking-weekday">${weekdays[index]}</span><span class="booking-date-number">${dateNumber(day.date)}</span>`;
     const current = (day: Day) => day.date === today ? ' aria-current="date"' : '';
-    const selection = selectedStart && allowRequest && !submitted
-      ? `<div class="booking-range-chip"><span><strong>已选择</strong> ${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedEnd)}</span><button type="button" class="text-button booking-jump" data-jump>填写申请 ↓</button></div>`
+    const selection = showSelection && hasForm && !submitted
+      ? `<div class="booking-range-chip"><span><strong>已选择</strong> ${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedEnd)}</span><button type="button" class="text-button booking-jump" data-jump>${mode === 'direct' ? '填写预约' : '填写申请'} ↓</button></div>`
       : '';
     if (view === 'day') {
       const city = cityOf(currentDay);
@@ -298,7 +387,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         ${city ? `<div class="booking-day-location"><span>${pin}地点</span><strong>${e(city)}</strong></div>` : ''}
         ${periods.map(period => `<section class="booking-day-period">
           <h3>${period.label} <span>${time(base + period.first * step)}–${time(base + (period.first + period.count) * step)}</span></h3>
-          <div class="booking-day-slots">${Array.from({ length: period.count }, (_, index) => slotMarkup(currentDay, base + (period.first + index) * step, true)).join('')}</div>
+          <div class="booking-day-slots">${Array.from({ length: period.count / 2 }, (_, index) => {
+            const row = period.first + index * 2;
+            const first = base + row * step;
+            return `<div class="booking-day-hour"><span class="booking-hour-label" aria-hidden="true">${time(first).slice(0, 2)} 时</span>${slotMarkup(currentDay, first, row, true)}${slotMarkup(currentDay, first + step, row + 1, true)}</div>`;
+          }).join('')}</div>
         </section>`).join('')}
       </div>${selection}`;
       return;
@@ -307,19 +400,19 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       const overview = days.map((day, index) => {
         const city = cityOf(day);
         const base = dayStart(day.date);
-        const segments = Array.from({ length: 12 }, (_, hour) => {
-          const first = base + 2 * hour * step;
-          const halfHours = [first, first + step];
-          if (halfHours.some(start => inSelection(start))) return 'selected';
-          const states = halfHours.map(start => stateAt(day, start));
-          return states.includes('request') ? 'request' : states.every(state => state === 'expired') ? 'expired' : 'unavailable';
+        const segments = Array.from({ length: 24 }, (_, index) => {
+          const start = base + index * step;
+          return inSelection(start) ? 'selected' : stateAt(start);
         });
-        const state = segments.includes('request') || segments.includes('selected') ? '可申请' : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
+        const state = segments.includes('selected') ? '已选择' : segments.includes('available') ? '有空闲'
+          : segments.includes('busy') ? '有占用' : segments.includes('request') ? '可申请'
+          : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
         const title = `${weekdays[index]} ${shortDate(day.date)} ${state}${city ? ` ${city}` : ''}，查看当天`;
         return `<button type="button" data-open-day="${e(day.date)}" aria-label="${e(title)}"${current(day)}>
           <span class="booking-overview-date"><strong>${weekdays[index]}</strong>${shortDate(day.date)}${day.date === today ? ' · 今天' : ''}</span>
-          <span class="booking-overview-detail">${city ? `<span class="booking-location-label">${pin}<span>${e(city)}</span></span>` : ''}<span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span></span>
+          <span class="booking-overview-detail">${city ? `<span class="booking-location-label">${pin}<span>${e(city)}</span></span>` : ''}</span>
           <span class="booking-overview-state">${state}<span aria-hidden="true">›</span></span>
+          <span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span>
         </button>`;
       }).join('');
       calendar.innerHTML = `<div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${selection}`;
@@ -329,7 +422,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const rows = Array.from({ length: 24 }, (_, row) => {
       const hour = row % 2 === 0;
       const clock = time(starts[0] + row * step);
-      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${days.map((day, index) => `<td${day.date === today ? ' class="booking-today-column"' : ''}>${slotMarkup(day, starts[index] + row * step)}</td>`).join('')}</tr>`;
+      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${days.map((day, index) => `<td${day.date === today ? ' class="booking-today-column"' : ''}>${slotMarkup(day, starts[index] + row * step, row)}</td>`).join('')}</tr>`;
     }).join('');
     calendar.innerHTML = `
       <table class="booking-week-grid" aria-label="工作日九点至二十一点的申请时段">
@@ -344,7 +437,8 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   function setWeek(data: Week, edge?: 'first' | 'last') {
     const sameWeek = week?.weekStart === data.weekStart;
-    const focused = sameWeek ? calendar?.querySelector('button:focus') : undefined;
+    const active = document.activeElement;
+    const focused = sameWeek && calendar?.contains(active) ? active : undefined;
     const focusKey = focused?.getAttributeNames().find(name => name.startsWith('data-'));
     if (!sameWeek) {
       selectedDate = '';
@@ -352,8 +446,16 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       visibleDay = edge ? data.days[edge === 'first' ? 0 : data.days.length - 1].date : '';
     }
     week = data;
+    if (weekVerified) {
+      directOffered = allowDirect && availabilityReady();
+      if (!directOffered && allowRequest) mode = 'request';
+    }
     readAt = performance.now();
     lastTick = Math.floor(now() / step);
+    window.clearTimeout(expiryTimer);
+    if (availabilityReady() && data.validUntil !== undefined) {
+      expiryTimer = window.setTimeout(refreshClock, Math.ceil(data.validUntil - now()));
+    }
     syncSelection();
     if (focused && focusKey) {
       const value = CSS.escape(focused.getAttribute(focusKey)!);
@@ -428,6 +530,13 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     drawCalendar();
     updateControls();
   });
+  for (const button of modeButtons) button.addEventListener('click', () => {
+    const nextMode = button.dataset.bookingMode === 'direct' ? 'direct' : 'request';
+    if (submitting || mode === nextMode || (nextMode === 'direct' && !directOffered)) return;
+    mode = nextMode;
+    showRequestMessage('');
+    syncSelection();
+  });
   calendar?.addEventListener('click', event => {
     if (submitting) return;
     const target = (event.target as Element).closest<HTMLButtonElement>('button');
@@ -441,7 +550,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       choose(startAt);
       calendar.querySelector<HTMLButtonElement>(`[data-slot="${startAt}"]`)?.focus({ preventScroll: true });
     } else if (target.hasAttribute('data-jump')) {
-      root.querySelector<HTMLElement>('#booking-request-title')?.focus();
+      actionTitle?.focus();
     }
   });
 
@@ -464,44 +573,61 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     };
   }
 
-  async function submitAttempt(draft: ReturnType<typeof readDraft>, submissionId: string) {
-    if (!alive || !form || !week || !weekVerified || submitting || submitted) return;
+  async function submitAttempt(draft: ReturnType<typeof readDraft>, submissionId: string, bookingMode: BookingMode) {
+    if (!alive || !form || !week || !weekVerified || preview || submitting || submitted) return;
+    const direct = bookingMode === 'direct';
     submitting = true;
     let refreshWeek: number | undefined;
     showRequestMessage('正在提交申请…');
     updateControls();
     try {
-      const response = await send('/invite/requests', { ...draft, submissionId });
+      const response = await send(direct ? '/invite/direct' : '/invite/requests', { ...draft, submissionId });
       if (!alive) return;
       if (!response || typeof response !== 'object' || !('ok' in response) || response.ok !== true) throw new Error('Invalid confirmation');
       submitted = true;
-      lastSubmission = undefined;
+      delete lastSubmissions.request;
+      delete lastSubmissions.direct;
       form.reset();
-      root.querySelector<HTMLElement>('[data-request-content]')!.innerHTML = '<div class="booking-receipt" role="status"><strong>已收到申请，等待确认</strong><p>邀请人确认后会通过邮件回复。</p></div>';
+      const title = direct ? '预约已确认' : '已收到申请，等待确认';
+      const detail = direct
+        ? 'mailStatus' in response && response.mailStatus === 'sent' ? '确认邮件已发出。' : '预约已生效，确认邮件暂未确认发出。'
+        : '邀请人确认后会通过邮件回复。';
+      const confirmedTime = direct && 'startAt' in response && 'endAt' in response
+        && typeof response.startAt === 'number' && typeof response.endAt === 'number'
+        && Number.isFinite(new Date(response.startAt + chinaOffset).getTime())
+        && Number.isFinite(new Date(response.endAt + chinaOffset).getTime())
+        ? `<p>${shortDate(bookingDate(response.startAt))} ${time(response.startAt)}–${time(response.endAt)}（UTC+8）</p>` : '';
+      root.querySelector<HTMLElement>('[data-request-content]')!.innerHTML = `<div class="booking-receipt" role="status"><strong>${title}</strong>${confirmedTime}<p>${detail}</p></div>`;
       drawCalendar();
     } catch (error) {
       if (!alive) return;
       if (error instanceof InvitationError && (error.status === 401 || error.status === 404)) { unavailable(); return; }
       if (error instanceof InvitationError && error.status === 429) {
-        showRequestMessage('申请操作过于频繁，请稍后再试。也可复制申请文字。', true);
+        showRequestMessage(direct ? '预约操作过于频繁，请稍后再试。' : '申请操作过于频繁，请稍后再试。也可复制申请文字。', true);
       } else if (error instanceof InvitationError && error.code === 'REQUESTS_DISABLED') {
-        week.canSubmit = false;
-        showRequestMessage('在线申请暂未开启。可复制申请文字发给邀请人。', true);
-      } else if (error instanceof InvitationError && error.code === 'SLOT_UNAVAILABLE') {
+        if (direct) {
+          week.canBook = false;
+          refreshWeek = week.week;
+          showRequestMessage('暂时无法直接预约。正在重新核对空闲时段。', true);
+        } else {
+          week.canSubmit = false;
+          showRequestMessage('在线申请暂未开启。可复制申请文字发给邀请人。', true);
+        }
+      } else if (error instanceof InvitationError && ['SLOT_UNAVAILABLE', 'SLOT_CONFLICT'].includes(error.code)) {
         selectedStart = 0;
         refreshWeek = week.week;
-        showRequestMessage('这个时段已经不能申请了，请选择其他时间。', true);
+        showRequestMessage(direct ? '这个时段已无法预约，请选择其他时间。' : '这个时段已经不能申请了，请选择其他时间。', true);
       } else if (error instanceof InvitationError && error.code === 'SUBMISSION_CHANGED') {
-        lastSubmission = undefined;
-        showRequestMessage('表单内容与原申请不一致，请核对后重新提交。', true);
+        delete lastSubmissions[bookingMode];
+        showRequestMessage('表单内容与原提交不一致，请核对后重新提交。', true);
       } else if (error instanceof InvitationError && error.status === 400) {
         syncSelection();
         showRequestMessage('请检查所选时间和表单信息后重试。', true);
       } else {
-        showRequestMessage('暂时无法确认提交结果。可重新确认这次提交，或复制申请文字发给邀请人。', true);
+        showRequestMessage(direct ? '暂时无法确认预约结果，请重新确认这次提交。' : '暂时无法确认提交结果。可重新确认这次提交，或复制申请文字发给邀请人。', true);
         const retry = document.createElement('button');
         retry.type = 'button'; retry.className = 'text-button'; retry.textContent = '重新确认提交';
-        retry.addEventListener('click', () => void submitAttempt(draft, submissionId));
+        retry.addEventListener('click', () => void submitAttempt(draft, submissionId, bookingMode));
         message?.append(retry);
       }
     } finally {
@@ -513,19 +639,23 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   form?.addEventListener('submit', event => {
     event.preventDefault();
-    if (!allowRequest || preview || !week?.canSubmit || !weekVerified || submitting || submitted) return;
-    if (!hasValidSelection()) { syncSelection(); showRequestMessage('请选择仍可申请的日期、时间和时长。', true); return; }
+    if (!canSubmitCurrentMode() || preview || submitting || submitted) return;
+    if (!hasValidSelection()) {
+      syncSelection();
+      showRequestMessage(mode === 'direct' ? '请选择仍可预约的日期、时间和时长。' : '请选择仍可申请的日期、时间和时长。', true);
+      return;
+    }
     const draft = readDraft();
     const email = parseEmailAddress(draft.email);
     if (!draft.name || !email) { showRequestMessage('请填写姓名和有效邮箱。', true); return; }
     draft.email = email;
     const body = JSON.stringify(draft);
-    if (lastSubmission?.body !== body) lastSubmission = { body, id: crypto.randomUUID() };
-    void submitAttempt(draft, lastSubmission.id);
+    if (lastSubmissions[mode]?.body !== body) lastSubmissions[mode] = { body, id: crypto.randomUUID() };
+    void submitAttempt(draft, lastSubmissions[mode]!.id, mode);
   });
 
-  root.querySelector<HTMLButtonElement>('[data-copy-request]')?.addEventListener('click', async () => {
-    if (submitting || submitted) return;
+  copyButton?.addEventListener('click', async () => {
+    if (mode !== 'request' || submitting || submitted) return;
     if (!hasValidSelection()) { showRequestMessage('请先选择想申请的时间。', true); return; }
     const draft = readDraft();
     const text = [
@@ -535,7 +665,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       `姓名：${draft.name}`, `邮箱：${draft.email}`, ...(draft.notes ? [`备注：${draft.notes}`] : []),
     ].join('\n');
     const copied = await copyText(text);
-    if (!alive || submitted) return;
+    if (!alive || submitted || mode !== 'request') return;
     if (manualCopy) {
       manualCopy.hidden = copied;
       const field = manualCopy.querySelector('textarea')!;
@@ -548,6 +678,10 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   function refreshClock() {
     if (!alive || !week || submitting || document.hidden) return;
     if (week.days.at(-1)!.date < bookingDate(now())) { void loadWeek(0); return; }
+    if (!weekRequest && weekVerified && week.availability === 'ready' && week.validUntil !== undefined && now() >= week.validUntil) {
+      void loadWeek(week.week);
+      return;
+    }
     const tick = Math.floor(now() / step);
     if (tick !== lastTick) { lastTick = tick; syncSelection(); }
   }
@@ -560,8 +694,10 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     alive = false;
     weekRequest?.abort();
     weekRequest = undefined;
-    lastSubmission = undefined;
+    delete lastSubmissions.request;
+    delete lastSubmissions.direct;
     if (showCalendar) compactWeek.removeEventListener('change', redrawWeek);
+    window.clearTimeout(expiryTimer);
     window.clearInterval(timer);
     document.removeEventListener('visibilitychange', refreshClock);
   };

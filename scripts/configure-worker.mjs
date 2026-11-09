@@ -34,6 +34,7 @@ try {
     workers_dev: false,
     preview_urls: false,
     observability: { enabled: false },
+    triggers: { crons: ['*/5 * * * *'] },
     vars: { FRONTEND_ORIGIN: frontend.origin, SITE_ORIGIN: (site || api).origin },
     routes,
     ...(databaseId ? { d1_databases: [{ binding: 'DB', database_name: 'invited-booking', database_id: databaseId, migrations_dir: '../migrations' }] } : {}),

@@ -4,6 +4,7 @@ import { createApi } from './app.js';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { openSqlite } from './sqlite.js';
+import { refreshCalendars } from './calendar-sources.js';
 
 const app = createApi();
 app.get('*', serveStatic({ root: './dist' }));
@@ -28,15 +29,18 @@ function externalRequest(request: Request): Request {
   return request;
 }
 
+const env = {
+  FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN,
+  SITE_ORIGIN: process.env.SITE_ORIGIN,
+  DATA_ENCRYPTION_KEY: process.env.DATA_ENCRYPTION_KEY,
+  SETUP_TOKEN_HASH: process.env.SETUP_TOKEN_HASH,
+  SETUP_EXPIRES_AT: process.env.SETUP_EXPIRES_AT,
+  DB,
+};
+setInterval(() => { void refreshCalendars(env).catch(() => {}); }, 5 * 60_000).unref();
+
 serve({
   port,
   hostname: '0.0.0.0',
-  fetch: (request) => app.fetch(externalRequest(request), {
-    FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN,
-    SITE_ORIGIN: process.env.SITE_ORIGIN,
-    DATA_ENCRYPTION_KEY: process.env.DATA_ENCRYPTION_KEY,
-    SETUP_TOKEN_HASH: process.env.SETUP_TOKEN_HASH,
-    SETUP_EXPIRES_AT: process.env.SETUP_EXPIRES_AT,
-    DB,
-  }),
+  fetch: (request) => app.fetch(externalRequest(request), env),
 }, () => console.log(`同域预览已启动 http://127.0.0.1:${port}`));

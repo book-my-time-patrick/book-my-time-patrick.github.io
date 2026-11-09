@@ -1,14 +1,17 @@
 import type { Context, Hono } from 'hono';
-import { BOOKING_DAY, isRequestSlot, parseEmailAddress, requestWeek } from '../shared/booking.js';
+import { BOOKING_DAY, isRequestSlot, parseEmailAddress, REQUEST_DURATIONS, REQUEST_HORIZON, requestWeek } from '../shared/booking.js';
 import { AuthError, requireAdmin } from './auth.js';
+import { CALENDAR_FRESH_MS, CALENDAR_WINDOW_MS, readAvailability } from './calendar-availability.js';
+import type { BusySnapshot } from './calendar-availability.js';
 import { withCalendarCities } from './calendar-location.js';
 import type { Environment } from './db.js';
-import { activeInvitation } from './invites.js';
-import { deliverBooking, REQUEST_MAIL_GATE_SQL, requestMailReady } from './mail.js';
+import { activeInvitation, invitationPermissions } from './invites.js';
+import { deliverBooking, DIRECT_MAIL_GATE_SQL, directMailReady, REQUEST_MAIL_GATE_SQL, requestMailReady } from './mail.js';
 import { fromBase64url, hmac, sha256 } from './security.js';
 
 type Ctx = Context<{ Bindings: Environment }>;
 type BookingStatus = 'pending' | 'confirmed' | 'declined' | 'suggested' | 'cancelled';
+type BookingSource = 'request' | 'direct';
 export type BookingMailStatus = 'pending' | 'sent' | 'failed' | 'unconfigured';
 type MeetingType = 'online' | 'in-person';
 
@@ -24,6 +27,7 @@ export interface BookingRow {
   meeting_type: MeetingType;
   notes: string;
   status: BookingStatus;
+  source: BookingSource;
   created_at: number;
   updated_at: number;
   message: string;
@@ -34,6 +38,19 @@ export interface BookingRow {
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
+const directCalendarGate = `EXISTS (SELECT 1 FROM calendar_settings WHERE id=1 AND direct_enabled=1)
+  AND (SELECT COUNT(*) FROM calendar_sources WHERE provider IN ('icloud','outlook')
+    AND synced_at>? AND synced_at<=? AND covered_from<=? AND covered_until>=?
+    AND last_error IS NULL AND json_type(busy_json)='array')=2`;
+const noConfirmedOverlap = `NOT EXISTS (SELECT 1 FROM booking_requests other
+  WHERE other.status='confirmed' AND other.start_at<? AND other.end_at>?)`;
+const noBusyOverlap = `NOT EXISTS (SELECT 1 FROM calendar_sources source, json_each(source.busy_json) busy
+  WHERE source.provider IN ('icloud','outlook')
+    AND json_extract(busy.value,'$[0]')<? AND json_extract(busy.value,'$[1]')>?)`;
+
+function calendarWindow(now: number) {
+  return [now - CALENDAR_FRESH_MS, now, now, now + CALENDAR_WINDOW_MS];
+}
 
 function database(c: Ctx) {
   if (!c.env.DB) throw new AuthError(503, 'SERVICE_UNAVAILABLE');
@@ -62,10 +79,6 @@ function readSlot(startAt: unknown, duration: unknown, now: number) {
     throw new AuthError(409, 'SLOT_UNAVAILABLE');
   }
   return { startAt, endAt: startAt + duration * MINUTE };
-}
-
-function invitePermissions(serialized: string) {
-  return JSON.parse(serialized) as { modules: string[]; modes: string[] };
 }
 
 async function limitRequest(c: Ctx, inviteId: string, now: number) {
@@ -123,6 +136,7 @@ export function bookingView(row: BookingRow, mailStatus = row.mail_status, now =
     endAt: row.end_at,
     meetingType: row.meeting_type,
     notes: row.notes,
+    source: row.source,
     status: expired ? 'expired' as const : row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -207,70 +221,123 @@ async function tryDelivery(c: Ctx, row: BookingRow): Promise<BookingMailStatus> 
   catch { return row.mail_status; }
 }
 
+async function canBookDirect(c: Ctx, now: number) {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(c.env.DATA_ENCRYPTION_KEY ?? '')) return false;
+  return Boolean(await database(c).prepare(`SELECT 1 WHERE ${DIRECT_MAIL_GATE_SQL} AND ${directCalendarGate}`)
+    .bind(...calendarWindow(now)).first());
+}
+
+async function showAvailability(c: Ctx, days: ReturnType<typeof requestWeek>['days'], now: number,
+  snapshot: BusySnapshot, hideBusy: boolean, showDurations: boolean) {
+  const start = days[0].slots[0].startAt;
+  const end = days.at(-1)!.slots.at(-1)!.startAt + 30 * MINUTE;
+  const booked = await database(c).prepare(`SELECT start_at,end_at FROM booking_requests
+    WHERE status='confirmed' AND start_at<? AND end_at>?`).bind(end, start).all<{ start_at: number; end_at: number }>();
+  const intervals = snapshot.busy.filter(([from, through]) => from < end && through > start);
+  for (const row of booked.results) intervals.push([row.start_at, row.end_at]);
+  intervals.sort(([a], [b]) => a - b);
+  let interval = 0;
+  return days.map(day => ({ ...day, slots: day.slots.map(slot => {
+    const startAt = slot.startAt;
+    if (startAt <= now || startAt > now + REQUEST_HORIZON) return slot;
+    while (interval < intervals.length && intervals[interval][1] <= startAt) interval++;
+    const nextBusy = intervals[interval]?.[0] ?? Infinity;
+    const free = REQUEST_DURATIONS.filter(duration => isRequestSlot(startAt, duration, now)
+      && startAt + duration * MINUTE <= nextBusy);
+    const availability = free.length ? 'available' : !hideBusy && nextBusy < startAt + 30 * MINUTE ? 'busy' : 'blocked';
+    return { ...slot, availability, ...(showDurations && free.length ? { bookableDurations: free } : {}) };
+  }) }));
+}
+
+async function submitBooking(c: Ctx, source: BookingSource) {
+  const direct = source === 'direct';
+  const invitation = await activeInvitation(c);
+  const permissions = invitationPermissions(invitation);
+  if (invitation.kind !== 'invite' || !permissions.modes.includes(source) || (direct && !permissions.modules.includes('calendar'))) {
+    throw new AuthError(403, 'REQUESTS_DISABLED');
+  }
+  const input = await jsonBody(c);
+  if (readText(input.website ?? '', 200)) throw new AuthError(400, 'INVALID_INPUT');
+  const name = readText(input.name, 80);
+  const email = parseEmailAddress(input.email);
+  const meetingType = input.meetingType;
+  const notes = readText(input.notes ?? '', 1000, true);
+  if (!name || !email || (meetingType !== 'online' && meetingType !== 'in-person')) throw new AuthError(400, 'INVALID_INPUT');
+  const submissionId = readText(input.submissionId, 36).toLowerCase();
+  if (!uuid.test(submissionId)) throw new AuthError(400, 'INVALID_INPUT');
+  const fingerprint = await sha256(JSON.stringify([name, email, input.startAt, input.duration, meetingType, notes]));
+  function receipt(row: BookingRow, mailStatus: BookingMailStatus) {
+    return { ok: true, mailStatus, ...(direct ? { startAt: row.start_at, endAt: row.end_at } : {}) };
+  }
+  function accepted(row: BookingRow) {
+    if (row.source !== source || row.submission_fingerprint !== fingerprint) throw new AuthError(409, 'SUBMISSION_CHANGED');
+    if (direct && row.status !== 'confirmed') throw new AuthError(409, 'SLOT_UNAVAILABLE');
+    return c.json(receipt(row, row.mail_status));
+  }
+  const existing = await findSubmission(c, invitation.id, submissionId);
+  if (existing) return accepted(existing);
+  const ready = (now: number) => direct ? canBookDirect(c, now) : requestMailReady(c);
+  const checkedAt = Date.now();
+  readSlot(input.startAt, input.duration, checkedAt);
+  if (!await ready(checkedAt)) throw new AuthError(403, 'REQUESTS_DISABLED');
+  await limitRequest(c, invitation.id, Date.now());
+  const now = Date.now();
+  const { startAt, endAt } = readSlot(input.startAt, input.duration, now);
+  // D1 serializes writes. The conflict and freshness checks must be part of the INSERT.
+  const gate = direct ? `direct_enabled=1 AND ${DIRECT_MAIL_GATE_SQL} AND ${directCalendarGate}
+        AND ${noConfirmedOverlap} AND ${noBusyOverlap}` : REQUEST_MAIL_GATE_SQL;
+  const directBindings = direct ? [...calendarWindow(now), endAt, startAt, endAt, startAt] : [];
+  const row = await database(c).prepare(`
+    INSERT INTO booking_requests(id,invite_id,submission_id,submission_fingerprint,name,email,start_at,end_at,meeting_type,notes,status,created_at,updated_at,source)
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?
+    FROM invites WHERE id=? AND kind='invite' AND revoked_at IS NULL AND expires_at>? AND permissions_json=?
+      AND ${gate}
+    ON CONFLICT(invite_id,submission_id) DO NOTHING
+    RETURNING *
+  `).bind(crypto.randomUUID(), invitation.id, submissionId, fingerprint, name, email, startAt, endAt,
+    meetingType, notes, direct ? 'confirmed' : 'pending', now, now, source,
+    invitation.id, now, invitation.permissions_json, ...directBindings).first<BookingRow>();
+  if (!row) {
+    const raced = await findSubmission(c, invitation.id, submissionId);
+    if (raced) return accepted(raced);
+    const current = await activeInvitation(c);
+    if (current.id !== invitation.id || current.permissions_json !== invitation.permissions_json
+      || (direct && current.direct_enabled !== 1)) throw new AuthError(404, 'NOT_FOUND');
+    if (direct && await ready(Date.now())) throw new AuthError(409, 'SLOT_CONFLICT');
+    throw new AuthError(403, 'REQUESTS_DISABLED');
+  }
+  return c.json(receipt(row, await tryDelivery(c, row)), 201);
+}
+
 export function mountBookings(app: Hono<{ Bindings: Environment }>) {
   app.get('/api/invite/calendar', async c => {
     const now = Date.now();
     const invitation = await activeInvitation(c, now);
-    const permissions = invitePermissions(invitation.permissions_json);
+    const permissions = invitationPermissions(invitation);
     const canRequest = permissions.modes.includes('request');
     const canSeeCalendar = permissions.modules.includes('calendar');
+    const allowDirect = canSeeCalendar && permissions.modes.includes('direct');
     if (!canRequest && !canSeeCalendar) throw new AuthError(404, 'NOT_FOUND');
     const requestedWeek = c.req.query('week') ?? '0';
     if (!/^\d{1,2}$/.test(requestedWeek)) throw new AuthError(400, 'INVALID_INPUT');
     const week = requestWeek(now, Number(requestedWeek), canRequest);
-    const [canSubmit, days] = await Promise.all([
+    const [canSubmit, days, calendar, directReady] = await Promise.all([
       invitation.kind === 'invite' && canRequest && requestMailReady(c),
       canSeeCalendar && permissions.modules.includes('travel') ? withCalendarCities(c, week.days, now) : week.days,
+      canSeeCalendar ? readAvailability(database(c), now) : undefined,
+      allowDirect && invitation.kind === 'invite' && directMailReady(c),
     ]);
-    return c.json({ ...week, days, canSubmit });
+    if (!calendar) return c.json({ ...week, days, canSubmit });
+    if (!calendar.snapshot) return c.json({ ...week, days, canSubmit, availability: 'unavailable', canBook: false });
+    const canBook = calendar.directEnabled && directReady;
+    const markedDays = await showAvailability(c, days, now, calendar.snapshot, permissions.hideBusy === true,
+      canBook || (allowDirect && invitation.kind === 'preview'));
+    return c.json({ ...week, days: markedDays, canSubmit, availability: 'ready', canBook,
+      validUntil: calendar.snapshot.validUntil });
   });
 
-  app.post('/api/invite/requests', async c => {
-    const invitation = await activeInvitation(c);
-    if (invitation.kind !== 'invite' || !invitePermissions(invitation.permissions_json).modes.includes('request')) {
-      throw new AuthError(403, 'REQUESTS_DISABLED');
-    }
-    const input = await jsonBody(c);
-    if (readText(input.website ?? '', 200)) throw new AuthError(400, 'INVALID_INPUT');
-    const name = readText(input.name, 80);
-    const email = parseEmailAddress(input.email);
-    const meetingType = input.meetingType;
-    const notes = readText(input.notes ?? '', 1000, true);
-    if (!name || !email || (meetingType !== 'online' && meetingType !== 'in-person')) throw new AuthError(400, 'INVALID_INPUT');
-    const submissionId = readText(input.submissionId, 36).toLowerCase();
-    if (!uuid.test(submissionId)) throw new AuthError(400, 'INVALID_INPUT');
-    const fingerprint = await sha256(JSON.stringify([name, email, input.startAt, input.duration, meetingType, notes]));
-    function accepted(row: BookingRow) {
-      if (row.submission_fingerprint !== fingerprint) throw new AuthError(409, 'SUBMISSION_CHANGED');
-      return c.json({ ok: true, mailStatus: row.mail_status });
-    }
-    const existing = await findSubmission(c, invitation.id, submissionId);
-    if (existing) return accepted(existing);
-    readSlot(input.startAt, input.duration, Date.now());
-    if (!await requestMailReady(c)) throw new AuthError(403, 'REQUESTS_DISABLED');
-    await limitRequest(c, invitation.id, Date.now());
-    const now = Date.now();
-    const { startAt, endAt } = readSlot(input.startAt, input.duration, now);
-    const row = await database(c).prepare(`
-      INSERT INTO booking_requests(id,invite_id,submission_id,submission_fingerprint,name,email,start_at,end_at,meeting_type,notes,status,created_at,updated_at)
-      SELECT ?,?,?,?,?,?,?,?,?,?,'pending',?,?
-      FROM invites WHERE id=? AND kind='invite' AND revoked_at IS NULL AND expires_at>? AND permissions_json=?
-        AND ${REQUEST_MAIL_GATE_SQL}
-      ON CONFLICT(invite_id,submission_id) DO NOTHING
-      RETURNING *
-    `).bind(crypto.randomUUID(), invitation.id, submissionId, fingerprint, name, email, startAt, endAt,
-      meetingType, notes, now, now, invitation.id, now, invitation.permissions_json).first<BookingRow>();
-    if (!row) {
-      const raced = await findSubmission(c, invitation.id, submissionId);
-      if (raced) return accepted(raced);
-      const current = await activeInvitation(c);
-      if (current.id === invitation.id && current.permissions_json === invitation.permissions_json) {
-        throw new AuthError(403, 'REQUESTS_DISABLED');
-      }
-      throw new AuthError(404, 'NOT_FOUND');
-    }
-    return c.json({ ok: true, mailStatus: await tryDelivery(c, row) }, 201);
-  });
+  app.post('/api/invite/requests', c => submitBooking(c, 'request'));
+  app.post('/api/invite/direct', c => submitBooking(c, 'direct'));
 
   app.get('/api/admin/requests', async c => {
     await requireBookingAdmin(c);

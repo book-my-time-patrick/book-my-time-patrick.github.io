@@ -31,9 +31,11 @@ interface Message {
 }
 const hour = 3_600_000;
 const day = 24 * hour;
-export const REQUEST_MAIL_GATE_SQL = `EXISTS (SELECT 1 FROM mail_settings m
-  JOIN mailboxes b ON b.id=m.primary_delivery_id WHERE m.id=1 AND m.accept_requests=1
-  AND m.sender<>'' AND m.api_key_cipher IS NOT NULL AND b.verified_at IS NOT NULL)`;
+const mailGate = `SELECT 1 FROM mail_settings m
+  JOIN mailboxes b ON b.id=m.primary_delivery_id WHERE m.id=1
+  AND m.sender<>'' AND m.api_key_cipher IS NOT NULL AND b.verified_at IS NOT NULL`;
+export const DIRECT_MAIL_GATE_SQL = `EXISTS (${mailGate})`;
+export const REQUEST_MAIL_GATE_SQL = `EXISTS (${mailGate} AND m.accept_requests=1)`;
 const formatter = new Intl.DateTimeFormat('zh-CN', {
   timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
@@ -69,10 +71,12 @@ async function readRoute(c: MailContext, inviteId: string) {
       WHERE i.invite_id=? AND b.verified_at IS NOT NULL) AS override_address
     FROM mail_settings s WHERE s.id=1`).bind(inviteId).first<MailRoute>();
 }
-export async function requestMailReady(c: MailContext) {
+async function bookingMailReady(c: MailContext, gate: string) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(c.env.DATA_ENCRYPTION_KEY ?? '')) return false;
-  return Boolean(await mailDb(c).prepare(`SELECT 1 WHERE ${REQUEST_MAIL_GATE_SQL}`).first());
+  return Boolean(await mailDb(c).prepare(`SELECT 1 WHERE ${gate}`).first());
 }
+export const requestMailReady = (c: MailContext) => bookingMailReady(c, REQUEST_MAIL_GATE_SQL);
+export const directMailReady = (c: MailContext) => bookingMailReady(c, DIRECT_MAIL_GATE_SQL);
 
 export async function sendMail(c: MailContext, config: MailConfig, message: Message, key: string): Promise<boolean> {
   if (!config.sender || !config.api_key_cipher) return false;
@@ -104,10 +108,15 @@ async function messages(c: MailContext, row: BookingRow, route: MailRoute) {
   const site = new URL(c.env.SITE_ORIGIN!);
   const time = dateLabel(row.start_at, row.end_at);
   const meeting = row.meeting_type === 'online' ? '线上 / Online' : '线下 / In person';
-  const mail = (to: string, status: CalendarStatus, summary: string) => calendarAttachment(calendarFile({
-    uid: `${row.id}@${site.hostname}`, organizer: route.sender, recipient: to, summary,
-    startAt: row.start_at, endAt: row.end_at, stamp: row.updated_at, sequence: row.sequence, status,
-  }));
+  const mail = (to: string, status: CalendarStatus, summary: string) => {
+    const direct = row.source === 'direct';
+    const content = calendarFile({
+      uid: `${row.id}@${site.hostname}`, organizer: route.sender, recipient: to, summary,
+      startAt: row.start_at, endAt: row.end_at, stamp: row.updated_at, sequence: row.sequence, status,
+      request: direct,
+    });
+    return calendarAttachment(content, direct ? (status === 'CANCELLED' ? 'CANCEL' : 'REQUEST') : undefined);
+  };
   type Job = { channel: string; message: Message };
   if (row.status === 'pending') {
     const value = `${row.id}.${row.sequence}.${row.start_at}`;

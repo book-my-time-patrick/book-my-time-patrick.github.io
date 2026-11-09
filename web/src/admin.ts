@@ -4,6 +4,8 @@ import { copyText, escapeHtml as e, formatTime, modeNames, moduleNames } from '.
 import { createSetupQr } from './qr';
 import { renderBookingInbox, renderCalendarLocation, renderMailSettings } from './admin-m2';
 import type { BookingView, CalendarLocationSettings, MailSettings, PanelActions, RequestFilter } from './admin-m2';
+import { renderCalendarConnections } from './admin-calendars';
+import type { CalendarConnections } from './admin-calendars';
 import { inviteStatus } from './invite-status';
 import type { InviteState } from './invite-status';
 
@@ -13,7 +15,7 @@ type AuthenticationOptions = Parameters<typeof startAuthentication>[0]['optionsJ
 type RegistrationResult = Awaited<ReturnType<typeof startRegistration>>;
 type LoginMethod = 'passkey' | 'password';
 interface DeviceChoice { deviceName: string; remember: boolean }
-interface Permissions { modules: string[]; modes: string[] }
+interface Permissions { modules: string[]; modes: string[]; hideBusy?: true }
 interface Session { id: string; label: string; os: string; browser: string; method: LoginMethod; createdAt: Time; lastSeenAt: Time; expiresAt: Time; current: boolean; recentAuthUntil?: Time }
 interface Me { id: string; name: string; session: Session }
 interface PasswordSettings { enabled: boolean; revision: string | null; updatedAt: number | null }
@@ -33,6 +35,7 @@ function diagnosticFor(error: unknown): string {
 function requestPhase(path: string): string {
   if (path.startsWith('/admin/requests')) return 'BOOKING_ADMIN';
   if (path.startsWith('/admin/mail')) return 'MAIL_ADMIN';
+  if (path.startsWith('/admin/calendar-sources')) return 'CALENDAR_ADMIN';
   const phases: Record<string, string> = { '/admin/setup/options': 'SETUP_START', '/admin/setup/verify': 'SETUP_VERIFY', '/admin/login/options': 'LOGIN_START', '/admin/login/verify': 'LOGIN_VERIFY', '/admin/login/password': 'PASSWORD_LOGIN', '/admin/password': 'PASSWORD_SETTINGS', '/admin/reauth/options': 'REAUTH_START', '/admin/reauth/verify': 'REAUTH_VERIFY', '/admin/me': 'SESSION_CHECK', '/admin/status': 'ADMIN_STATUS' };
   return phases[path] ?? 'ADMIN_API';
 }
@@ -56,6 +59,15 @@ function messageFor(error: unknown): string {
     if (error.code === 'SLOT_UNAVAILABLE') return '这个时间已过去或超出申请范围。请选择未来工作日的其他时间。';
     if (error.code === 'INVALID_CITY') return '请填写不超过 24 个字符的城市名称，例如深圳或香港。';
     if (error.code === 'INVALID_DATE_RANGE') return '请选择北京时间今天起 30 天内的日期，结束日期不能早于开始日期。';
+    if (error.code === 'CALENDAR_AUTH_REQUIRED') return '日历服务拒绝授权。请核对 App 专用密码或 Microsoft 授权。';
+    if (error.code === 'CALENDAR_UNSUPPORTED') return '这本日历暂未提供可读取的忙闲数据。请选择其他日历，或稍后重试。';
+    if (error.code === 'CALENDAR_RESPONSE_INVALID') return '日历返回的数据不完整，暂不能用于预约。';
+    if (error.code === 'CALENDAR_LIMIT_EXCEEDED') return '日历数据过多，暂时无法完成同步。';
+    if (error.code === 'CALENDAR_UNAVAILABLE') return '暂时无法连接日历服务，请稍后重试。';
+    if (error.code === 'CALENDAR_CONFIG_INVALID') return '请核对日历账户类型和 Microsoft 应用配置。';
+    if (error.code === 'CALENDAR_FLOW_EXPIRED') return '这次 Microsoft 授权已过期或已使用。请重新开始授权。';
+    if (error.code === 'CALENDAR_CHANGED') return '另一台设备已更改连接，请读取最新状态后重试。';
+    if (error.code === 'CALENDAR_NOT_READY') return '请先确认 iCloud 与 Outlook 都已同步，并验证送达邮箱。';
     if (error.code === 'MAIL_NOT_CONFIGURED') return '请先保存已验证域名的发件地址和 Resend 密钥。';
     if (error.code === 'MAIL_SEND_FAILED') return '发信服务未确认接收。请检查 Resend 的发件域名和密钥，再重试。';
     if (error.code === 'MAILBOX_UNVERIFIED') return '请先用验证码验证这个邮箱。';
@@ -65,7 +77,7 @@ function messageFor(error: unknown): string {
     if (error.code === 'MAILBOX_LIMIT') return '最多可添加 20 个邮箱。请先移除一个不用的邮箱。';
     if (error.code === 'MAILBOX_ALREADY_VERIFIED') return '这个邮箱已经验证。请刷新邮箱设置。';
     if (error.code === 'MAIL_SETTINGS_CHANGED') return '邮箱设置已更新。请重新打开「邮箱设置」后再操作。';
-    if (error.code === 'INVALID_INPUT' && (error.phase === 'BOOKING_ADMIN' || error.phase === 'MAIL_ADMIN')) return '请核对填写的内容后重试。';
+    if (error.code === 'INVALID_INPUT' && ['BOOKING_ADMIN', 'MAIL_ADMIN', 'CALENDAR_ADMIN'].includes(error.phase)) return '请核对填写的内容后重试。';
     if (error.code === 'LAST_PASSKEY' || error.code === 'LAST_CREDENTIAL') return '至少需要保留一把通行密钥，请先添加另一把。';
     if (error.status === 503) return '管理服务暂时无法使用，请稍后重试。';
     if (error.status === 401 && error.phase === 'PASSWORD_LOGIN') return '密码验证未通过。请确认密码，或改用通行密钥。';
@@ -91,11 +103,12 @@ const inviteStateLabels: Record<InviteState, string> = { active: '有效', expir
 function isRevoked(invite: Invite): boolean { return invite.revokedAt !== null && invite.revokedAt !== undefined; }
 function formValue(form: HTMLFormElement, key: string): string { return String(new FormData(form).get(key) ?? '').trim(); }
 function permissionsForm(permissions: Permissions): string {
-  return `<fieldset class="admin-permissions"><legend>可见内容</legend><div class="admin-check-grid">${Object.entries(moduleNames).map(([value, label]) => `<label class="admin-checkbox"><input type="checkbox" name="modules" value="${value}" ${permissions.modules.includes(value) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset><fieldset class="admin-permissions"><legend>允许的预约方式</legend><div class="admin-check-grid">${Object.entries(modeNames).map(([value, label]) => `<label class="admin-checkbox"><input type="checkbox" name="modes" value="${value}" ${permissions.modes.includes(value) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset>`;
+  return `<fieldset class="admin-permissions"><legend>可见内容</legend><div class="admin-check-grid">${Object.entries(moduleNames).map(([value, label]) => `<label class="admin-checkbox"><input type="checkbox" name="modules" value="${value}" ${permissions.modules.includes(value) ? 'checked' : ''}>${label}</label>`).join('')}</div><label class="admin-checkbox"><input type="checkbox" name="hideBusy"${permissions.hideBusy ? ' checked' : ''}>把已占用显示为未开放</label></fieldset><fieldset class="admin-permissions"><legend>允许的预约方式</legend><div class="admin-check-grid">${Object.entries(modeNames).map(([value, label]) => `<label class="admin-checkbox"><input type="checkbox" name="modes" value="${value}" ${permissions.modes.includes(value) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset>`;
 }
 function readPermissions(form: HTMLFormElement): Permissions {
   const data = new FormData(form);
-  return { modules: data.getAll('modules').map(String).filter(value => Object.hasOwn(moduleNames, value)), modes: data.getAll('modes').map(String).filter(value => Object.hasOwn(modeNames, value)) };
+  return { modules: data.getAll('modules').map(String).filter(value => Object.hasOwn(moduleNames, value)), modes: data.getAll('modes').map(String).filter(value => Object.hasOwn(modeNames, value)),
+    ...(data.has('hideBusy') ? { hideBusy: true as const } : {}) };
 }
 
 export function renderAdmin(root: HTMLElement): () => void {
@@ -104,7 +117,10 @@ export function renderAdmin(root: HTMLElement): () => void {
   let revision = 0;
   let identityVersion = 0;
   let me: Me | null = null;
-  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' = 'invites';
+  const returnPrefix = '#/admin/calendar-return?';
+  let calendarReturn = location.hash.startsWith(returnPrefix) ? new URLSearchParams(location.hash.slice(returnPrefix.length)) : null;
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' = calendarReturn ? 'calendars' : 'invites';
+  if (calendarReturn) history.replaceState(null, '', '#/admin');
   let requestFilter: RequestFilter = 'pending';
   let passwordEnabled = false;
   let setupToken = /^#\/admin\/setup\/([A-Za-z0-9_-]{32,256})$/.exec(location.hash)?.[1] ?? '';
@@ -449,6 +465,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       requests: ['预约申请', '处理待确认的申请，查看已确认的预约。'],
       mail: ['邮箱设置', '配置发信服务，验证接收预约通知和日历附件的邮箱。'],
       location: ['日历地点', '设置预约周历中的城市，按日期调整地点。'],
+      calendars: ['日历连接', '同步私人和工作日历的忙闲，设置直接预约。'],
       devices: ['登录设备', '查看和管理能够进入后台的浏览器登录。'],
       passkeys: ['通行密钥', '为常用设备保存登录方式，并管理已经添加的凭据。'],
       password: ['登录密码', '为后台启用一个备用登录方式。'],
@@ -475,7 +492,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     });
   }
-  async function showBookingPanel(panel: 'requests' | 'mail' | 'location', version: number) {
+  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars', version: number) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
     const isCurrent = () => rootIsCurrent(version) && me !== null;
@@ -512,6 +529,28 @@ export function renderAdmin(root: HTMLElement): () => void {
       };
       const actions: PanelActions = { request, run, banner, isCurrent, reload };
       await reload();
+    } else if (panel === 'calendars') {
+      const reload = async (message?: string) => {
+        const settings = await request<CalendarConnections>('/admin/calendar-sources');
+        if (!isCurrent()) return;
+        renderCalendarConnections(content, settings, actions);
+        if (message) banner(message);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      const returned = calendarReturn;
+      calendarReturn = null;
+      if (returned?.has('state') && returned.has('code')) {
+        try {
+          await request('/admin/calendar-sources/outlook/finish', { state: returned.get('state'), code: returned.get('code') });
+          await reload('Microsoft 已授权。请选择要同步的工作日历。');
+        } catch (error) {
+          if (isCurrent() && !(error instanceof StaleRequestError)) reportError(error);
+          await reload();
+        }
+      } else {
+        await reload();
+        if (returned?.has('cancelled') && isCurrent()) banner('Microsoft 授权未完成，可以重新开始。', true);
+      }
     } else {
       const reload = async (message?: string) => {
         const settings = await request<CalendarLocationSettings>('/admin/calendar-location');
@@ -560,7 +599,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     stopInviteWatch();
     displayedInvites = new Map(invites.map(invite => [invite.id, invite]));
     const version = revision;
-    const permissions = editing?.permissions ?? { modules: ['profile', 'calendar', 'contact'], modes: ['request', 'direct', 'open'] };
+    const permissions = editing?.permissions ?? { modules: ['profile', 'calendar', 'contact'], modes: ['request', 'open'] };
     content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(localDate(editing?.expiresAt ?? inviteNow() + 30 * 86_400_000))}" required></label>${permissionsForm(permissions)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。在「邮箱设置」开放预约申请后，勾选「申请时间」的邀请可接收申请。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
     content.querySelector('#cancel-edit')?.addEventListener('click', () => showInvites([...displayedInvites.values()]));
     const list = content.querySelector<HTMLElement>('#invite-list')!;
@@ -920,20 +959,19 @@ export function renderAdmin(root: HTMLElement): () => void {
   const visibility = () => {
     if (!document.hidden) { void syncInviteClock(); void checkSession(); }
   };
-  const clearMailKey = () => {
-    const input = root.querySelector<HTMLInputElement>('[data-mail-sender] [name="apiKey"]');
-    if (input) input.value = '';
+  const clearSettingsSecrets = () => {
+    root.querySelectorAll<HTMLInputElement>('[data-mail-sender] [name="apiKey"], [data-calendar-secret]').forEach(input => { input.value = ''; });
   };
   document.addEventListener('visibilitychange', visibility);
   window.addEventListener('pageshow', visibility);
-  window.addEventListener('pagehide', clearMailKey);
+  window.addEventListener('pagehide', clearSettingsSecrets);
   const interval = window.setInterval(() => void checkSession(), 45000);
   void initialize();
   return () => {
-    clearMailKey();
+    clearSettingsSecrets();
     alive = false; controller.abort(); clearPrivate(); setupToken = '';
     window.clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('pageshow', visibility);
-    window.removeEventListener('pagehide', clearMailKey);
+    window.removeEventListener('pagehide', clearSettingsSecrets);
     root.replaceChildren();
   };
 }

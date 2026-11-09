@@ -4,6 +4,7 @@ import { AuthError, mountAuth } from './auth.js';
 import { mountBookings } from './booking.js';
 import { mountBookingReview } from './booking-review.js';
 import { mountCalendarLocation } from './calendar-location.js';
+import { mountCalendarSources } from './calendar-sources.js';
 import { mountInvites } from './invites.js';
 import { mountMailSettings } from './mail-settings.js';
 import type { Environment } from './db.js';
@@ -54,6 +55,7 @@ export function createApi() {
   mountMailSettings(app);
   mountBookingReview(app);
   mountCalendarLocation(app);
+  mountCalendarSources(app);
   app.all('/api/*', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.all('/api', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.get('/robots.txt', (context) => context.text('User-agent: *\nDisallow: /\n'));
