@@ -65,18 +65,21 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const { showCalendar, showCity, hideBusy, allowRequest, allowDirect, preview, send, unavailable } = options;
   const hasForm = allowRequest || allowDirect;
   const navigation = `<div class="booking-period-nav" aria-label="切换日期范围" role="group">
-    <button class="secondary booking-nav-arrow" type="button" data-calendar-step="-1" aria-label="上一周" disabled><span aria-hidden="true">‹</span></button>
     <div class="booking-period" aria-live="polite">
-      <span data-period-note class="booking-period-note">中国标准时间</span>
+      <span data-period-note class="booking-period-note"></span>
       <p class="booking-week-range" data-week-range>本周</p>
     </div>
-    <button class="secondary booking-nav-arrow" type="button" data-calendar-step="1" aria-label="下一周" disabled><span aria-hidden="true">›</span></button>
+    <div class="booking-period-controls">
+      <button class="booking-nav-arrow" type="button" data-calendar-step="-1" aria-label="上一周" disabled><span aria-hidden="true">‹</span></button>
+      ${showCalendar ? '<button class="booking-nav-today" type="button" data-calendar-today disabled>今天</button>' : ''}
+      <button class="booking-nav-arrow" type="button" data-calendar-step="1" aria-label="下一周" disabled><span aria-hidden="true">›</span></button>
+    </div>
   </div>`;
   const weekFeedback = '<p class="booking-feedback" data-calendar-message role="status" aria-live="polite"></p>';
   root.innerHTML = `
     ${showCalendar ? `<section class="invitation-card booking-card booking-calendar-card" aria-labelledby="booking-calendar-title">
       <div class="booking-section-head booking-calendar-head">
-        <div><p class="eyebrow">AVAILABILITY</p><h2 id="booking-calendar-title">预约日历</h2></div>
+        <h2 id="booking-calendar-title">预约日历</h2>
         <div class="booking-view-toggle" role="group" aria-label="日历视图">
           <button type="button" data-calendar-view="week" aria-pressed="false">周视图</button>
           <button type="button" data-calendar-view="day" aria-pressed="false">日视图</button>
@@ -85,16 +88,12 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       ${navigation}
       ${weekFeedback}
       <div class="booking-legend" aria-label="周历图例">
-        <span data-legend-request><i class="booking-key request" aria-hidden="true"></i>可申请</span>
-        <span data-legend-availability hidden><i class="booking-key available" aria-hidden="true"></i>空闲</span>
-        ${hideBusy ? '' : '<span data-legend-availability hidden><i class="booking-key busy" aria-hidden="true"></i>已占用</span>'}
+        ${hideBusy ? '' : '<span data-legend-busy hidden><i class="booking-key busy" aria-hidden="true"></i>已占用</span>'}
         ${hasForm ? '<span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
-        <span><i class="booking-key expired" aria-hidden="true"></i>已过期</span>
-        <span><i class="booking-key unavailable" aria-hidden="true">–</i>未开放</span>
         <span class="booking-legend-zone">UTC+8</span>
       </div>
+      <p class="booking-calendar-hint" data-calendar-caption hidden></p>
       <div data-calendar class="booking-calendar" aria-busy="true"></div>
-      <p class="booking-caption" data-calendar-caption>「可申请」表示可提出的时间。实际能否见面由邀请人确认。</p>
     </section>` : ''}
     ${hasForm ? `<section class="invitation-card booking-card" data-booking-actions aria-labelledby="booking-request-title"${allowRequest ? '' : ' hidden'}>
       <div class="booking-section-head"><div><p class="eyebrow">BOOK A TIME</p><h2 id="booking-request-title" tabindex="-1">预约其他时间</h2></div><span class="booking-zone" data-mode-note>待邀请人确认</span></div>
@@ -139,6 +138,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const periodNote = root.querySelector<HTMLElement>('[data-period-note]')!;
   const previous = root.querySelector<HTMLButtonElement>('[data-calendar-step="-1"]')!;
   const next = root.querySelector<HTMLButtonElement>('[data-calendar-step="1"]')!;
+  const todayButton = root.querySelector<HTMLButtonElement>('[data-calendar-today]');
   const viewButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-calendar-view]')];
   const actionCard = root.querySelector<HTMLElement>('[data-booking-actions]');
   const actionTitle = root.querySelector<HTMLElement>('#booking-request-title');
@@ -147,8 +147,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const modeNote = root.querySelector<HTMLElement>('[data-mode-note]');
   const modeCaption = root.querySelector<HTMLElement>('[data-mode-caption]');
   const calendarCaption = root.querySelector<HTMLElement>('[data-calendar-caption]');
-  const requestLegend = root.querySelector<HTMLElement>('[data-legend-request]');
-  const availabilityLegend = root.querySelectorAll<HTMLElement>('[data-legend-availability]');
+  const busyLegend = root.querySelector<HTMLElement>('[data-legend-busy]');
   const form = root.querySelector<HTMLFormElement>('form');
   const dateField = form?.querySelector<HTMLSelectElement>('[name="date"]');
   const timeField = form?.querySelector<HTMLSelectElement>('[name="startAt"]');
@@ -216,6 +215,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     next.setAttribute('aria-label', `下一${unit}`);
     previous.disabled = submitting || !week || (week.week === 0 && (view === 'week' || index <= 0));
     next.disabled = submitting || !week || (week.week === week.maxWeek && (view === 'week' || index === week.days.length - 1));
+    if (todayButton) todayButton.disabled = submitting || !week || (week.week === 0 && (view === 'week' || visibleDay === bookingDate(now())));
     for (const button of viewButtons) {
       button.setAttribute('aria-pressed', String(button.dataset.calendarView === view));
       button.disabled = submitting;
@@ -232,12 +232,15 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     if (modeCaption) modeCaption.textContent = direct
       ? '请选择空闲时段（UTC+8），并留下收取预约确认的邮箱。'
       : '请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。';
-    if (calendarCaption) calendarCaption.textContent = availabilityReady()
-      ? `日历仅显示时间状态。${allowRequest ? '也可通过邮件申请其他时间。' : ''}`
-      : allowRequest ? '「可申请」表示可提出的时间。实际能否见面由邀请人确认。'
-      : weekRequest ? '正在核对空闲时段。' : '目前没有可显示的空闲时段。';
-    if (requestLegend) requestLegend.hidden = availabilityReady() || !allowRequest;
-    for (const item of availabilityLegend) item.hidden = !availabilityReady();
+    if (calendarCaption) {
+      let caption = '';
+      if (direct && directSelectable()) caption = '点按可预约的空白时段选择时间。';
+      else if (allowRequest) caption = '点按未来工作日的时段提出申请，由邀请人确认。';
+      else if (week && !weekRequest && !availabilityReady()) caption = '忙闲信息暂未同步。';
+      calendarCaption.textContent = caption;
+      calendarCaption.hidden = !caption || submitted;
+    }
+    if (busyLegend) busyLegend.hidden = !availabilityReady();
     calendar?.setAttribute('aria-busy', String(!week && Boolean(weekRequest)));
     if (fieldset) fieldset.disabled = submitting;
     if (submitButton) {
@@ -299,32 +302,23 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const year = week.weekStart.slice(0, 4);
     if (view === 'day' && currentDay) {
       const weekday = weekdays[week.days.indexOf(currentDay)];
-      range.textContent = `${shortDate(currentDay.date)} · ${weekday}`;
-      periodNote.textContent = `${currentDay.date.slice(0, 4)} 年${currentDay.date === bookingDate(now()) ? ' · 今天' : ''}`;
+      range.textContent = `${shortDate(currentDay.date)} · ${weekday}${currentDay.date === bookingDate(now()) ? ' · 今天' : ''}`;
+      periodNote.textContent = `${currentDay.date.slice(0, 4)} 年 ${Number(currentDay.date.slice(5, 7))} 月`;
       return;
     }
     const last = week.days.at(-1)!.date;
     const lastYear = last.slice(0, 4);
     range.textContent = `${shortDate(week.weekStart)} – ${lastYear === year ? '' : `${lastYear} 年 `}${shortDate(last)}`;
-    periodNote.textContent = `${year} 年${week.week === 0 ? ' · 本周' : ''}`;
+    periodNote.textContent = `${year} 年 ${Number(week.weekStart.slice(5, 7))} 月`;
   }
 
   function cityOf(day: Day) {
     return weekVerified && showCity && day.date >= bookingDate(now()) && typeof day.city === 'string' ? day.city.trim() : '';
   }
 
-  function weekLocations(days: Day[]) {
-    const groups: { city: string; span: number }[] = [];
-    for (const day of days) {
-      const city = cityOf(day);
-      const previousGroup = groups.at(-1);
-      if (previousGroup?.city === city) previousGroup.span++;
-      else groups.push({ city, span: 1 });
-    }
-    if (!groups.some(group => group.city)) return '';
-    return `<tr class="booking-location-row"><th scope="row">地点</th>${groups.map(group =>
-      `<td colspan="${group.span}">${group.city ? `<span class="booking-location-label" title="${e(group.city)}">${pin}<span>${e(group.city)}</span></span>` : ''}</td>`,
-    ).join('')}</tr>`;
+  function cityLabel(day: Day) {
+    const city = cityOf(day);
+    return city ? `<span class="booking-location-label" title="${e(city)}">${pin}<span>${e(city)}</span></span>` : '';
   }
 
   function drawCalendar() {
@@ -349,7 +343,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     };
     const showSelection = Boolean(selectedStart && (mode !== 'direct' || showAvailability));
     const inSelection = (startAt: number) => showSelection && startAt >= selectedStart && startAt < selectedEnd;
-    const slotMarkup = (day: Day, startAt: number, row: number, dayView = false) => {
+    const slotMarkup = (day: Day, startAt: number, row: number) => {
       const slot = slots.get(startAt);
       const state = stateAt(startAt);
       const chosen = Boolean(slot && canChoose(slot) && !submitted);
@@ -359,44 +353,23 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       const status = selected ? '已选择' : stateNames[state];
       const action = chosen && !selected && mode === 'request' && state !== 'request' ? '，可发邮件申请' : '';
       const label = `${shortDate(day.date)} ${time(startAt)} ${status}${action}`;
-      const check = first ? '<span aria-hidden="true">✓</span>' : '';
-      const contents = dayView ? `<span>${time(startAt)}${check}</span><small>${status}</small>`
-        : (first || (!selected && (state === 'request' || state === 'available' || (chosen && state === 'unavailable'))) ? time(startAt) : '') + check;
-      const joinBefore = !dayView && !selected && row > 0 && !inSelection(startAt - step) && stateAt(startAt - step) === state;
-      const joinAfter = !dayView && !selected && row < 23 && !inSelection(startAt + step) && stateAt(startAt + step) === state;
+      const busy = state === 'busy' && !selected;
+      const joinBefore = busy && row > 0 && !inSelection(startAt - step) && stateAt(startAt - step) === 'busy';
+      const joinAfter = busy && row < 23 && !inSelection(startAt + step) && stateAt(startAt + step) === 'busy';
+      const contents = first ? `<span aria-hidden="true">✓ ${time(startAt)}</span>`
+        : busy && !joinBefore ? '<span aria-hidden="true">已占用</span>'
+        : chosen && !busy && !selected ? `<span class="booking-slot-time" aria-hidden="true">${time(startAt)}</span>` : '';
       const classes = `booking-slot ${state}${selected ? ' selected' : ''}${first ? ' selection-first' : ''}${last ? ' selection-last' : ''}${joinBefore ? ' joins-before' : ''}${joinAfter ? ' joins-after' : ''}`;
       return chosen
-        ? `<button class="${classes}" type="button" data-slot="${startAt}" aria-label="${label}" aria-pressed="${first}">${contents}</button>`
+        ? `<button class="${classes}" type="button" data-slot="${startAt}" title="${label}" aria-label="${label}" aria-pressed="${first}">${contents}</button>`
         : `<span class="${classes}" role="img" aria-label="${label}">${contents}</span>`;
     };
-    const dayLabel = (day: Day, index: number) => `<span class="booking-weekday">${weekdays[index]}</span><span class="booking-date-number">${dateNumber(day.date)}</span>`;
+    const dayLabel = (day: Day, index: number) => `<span class="booking-date-number">${dateNumber(day.date)}</span><span class="booking-weekday">${weekdays[index]}</span>`;
     const current = (day: Day) => day.date === today ? ' aria-current="date"' : '';
     const selection = showSelection && hasForm && !submitted
       ? `<div class="booking-range-chip"><span><strong>已选择</strong> ${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedEnd)}</span><button type="button" class="text-button booking-jump" data-jump>${mode === 'direct' ? '填写预约' : '填写申请'} ↓</button></div>`
       : '';
-    if (view === 'day') {
-      const city = cityOf(currentDay);
-      const base = dayStart(currentDay.date);
-      const periods = [
-        { label: '上午', first: 0, count: 6 },
-        { label: '下午', first: 6, count: 12 },
-        { label: '晚上', first: 18, count: 6 },
-      ];
-      calendar.innerHTML = `<div class="booking-day-view">
-        <div class="booking-days" role="group" aria-label="本周日期">${days.map((day, index) => `<button type="button" data-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}" aria-pressed="${day === currentDay}"${current(day)}>${dayLabel(day, index)}</button>`).join('')}</div>
-        ${city ? `<div class="booking-day-location"><span>${pin}地点</span><strong>${e(city)}</strong></div>` : ''}
-        ${periods.map(period => `<section class="booking-day-period">
-          <h3>${period.label} <span>${time(base + period.first * step)}–${time(base + (period.first + period.count) * step)}</span></h3>
-          <div class="booking-day-slots">${Array.from({ length: period.count / 2 }, (_, index) => {
-            const row = period.first + index * 2;
-            const first = base + row * step;
-            return `<div class="booking-day-hour"><span class="booking-hour-label" aria-hidden="true">${time(first).slice(0, 2)} 时</span>${slotMarkup(currentDay, first, row, true)}${slotMarkup(currentDay, first + step, row + 1, true)}</div>`;
-          }).join('')}</div>
-        </section>`).join('')}
-      </div>${selection}`;
-      return;
-    }
-    if (compactWeek.matches) {
+    if (view === 'week' && compactWeek.matches) {
       const overview = days.map((day, index) => {
         const city = cityOf(day);
         const base = dayStart(day.date);
@@ -410,7 +383,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         const title = `${weekdays[index]} ${shortDate(day.date)} ${state}${city ? ` ${city}` : ''}，查看当天`;
         return `<button type="button" data-open-day="${e(day.date)}" aria-label="${e(title)}"${current(day)}>
           <span class="booking-overview-date"><strong>${weekdays[index]}</strong>${shortDate(day.date)}${day.date === today ? ' · 今天' : ''}</span>
-          <span class="booking-overview-detail">${city ? `<span class="booking-location-label">${pin}<span>${e(city)}</span></span>` : ''}</span>
+          <span class="booking-overview-detail">${cityLabel(day)}</span>
           <span class="booking-overview-state">${state}<span aria-hidden="true">›</span></span>
           <span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span>
         </button>`;
@@ -418,17 +391,24 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       calendar.innerHTML = `<div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${selection}`;
       return;
     }
-    const starts = days.map(day => dayStart(day.date));
+    const dayView = view === 'day';
+    const visibleDays = dayView ? [currentDay] : days;
+    const starts = visibleDays.map(day => dayStart(day.date));
+    const column = (day: Day) => !dayView && days.indexOf(day) >= 5 ? ' class="booking-weekend"' : '';
     const rows = Array.from({ length: 24 }, (_, row) => {
       const hour = row % 2 === 0;
       const clock = time(starts[0] + row * step);
-      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${days.map((day, index) => `<td${day.date === today ? ' class="booking-today-column"' : ''}>${slotMarkup(day, starts[index] + row * step, row)}</td>`).join('')}</tr>`;
+      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${visibleDays.map((day, index) => `<td${column(day)}>${slotMarkup(day, starts[index] + row * step, row)}</td>`).join('')}</tr>`;
     }).join('');
     calendar.innerHTML = `
-      <table class="booking-week-grid" aria-label="工作日九点至二十一点的申请时段">
-        <thead><tr><th scope="col">时间</th>${days.map((day, index) => `<th scope="col"${day.date === today ? ' class="booking-today-column"' : ''}>
-          <button type="button" data-open-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}，查看当天"${current(day)}>${dayLabel(day, index)}${day.date === today ? '<span class="booking-today-label">今天</span>' : ''}</button>
-        </th>`).join('')}</tr>${weekLocations(days)}</thead>
+      ${dayView ? `<div class="booking-days" role="group" aria-label="本周日期">${days.map((day, index) => `<button type="button" data-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}" aria-pressed="${day === currentDay}"${current(day)}>${dayLabel(day, index)}</button>`).join('')}</div>` : ''}
+      <table class="booking-time-grid ${dayView ? 'booking-day-grid' : 'booking-week-grid'}" aria-label="${dayView ? '当日' : '本周'}时间网格（UTC+8）">
+        <thead>
+          ${dayView ? '' : `<tr><th scope="col">时间</th>${days.map((day, index) => `<th scope="col"${column(day)}>
+            <button type="button" data-open-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}，查看当天"${current(day)}>${dayLabel(day, index)}</button>
+          </th>`).join('')}</tr>`}
+          <tr class="booking-location-row"><th scope="row">全天</th>${visibleDays.map(day => `<td${column(day)}>${cityLabel(day)}</td>`).join('')}</tr>
+        </thead>
         <tbody>${rows}</tbody>
       </table>${selection}`;
   }
@@ -525,6 +505,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   previous.addEventListener('click', () => move(-1));
   next.addEventListener('click', () => move(1));
+  todayButton?.addEventListener('click', () => {
+    if (!week || submitting) return;
+    if (week.week !== 0) void loadWeek(0);
+    else if (view === 'day') showDay(bookingDate(now()));
+  });
   for (const button of viewButtons) button.addEventListener('click', () => {
     view = button.dataset.calendarView === 'day' ? 'day' : 'week';
     drawCalendar();

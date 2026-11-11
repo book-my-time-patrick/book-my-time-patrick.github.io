@@ -343,7 +343,7 @@ export function renderCalendarLocation(content: HTMLElement, settings: CalendarL
   content.innerHTML = `
     <section class="admin-card admin-calendar-location">
       <h2>默认城市</h2>
-      <p class="admin-copy">仅填写城市，例如深圳或香港。邀请同时开放「预约日历」和「城市行程」时，访客才会看到地点。</p>
+      <p class="admin-copy">填写城市，例如深圳或香港。城市显示在预约日历的「全天」行。访客需要同时拥有「预约日历」和「城市行程」权限。</p>
       <form method="post" data-default-city>
         <label class="admin-field">城市<input name="defaultCity" maxlength="24" value="${e(settings.defaultCity)}" placeholder="例如深圳" autocomplete="off"><span class="admin-help">留空后保存可清除默认城市。</span></label>
         <div class="admin-actions"><button class="primary" type="submit">保存默认城市</button></div>
