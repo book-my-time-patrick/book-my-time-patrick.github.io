@@ -6,6 +6,8 @@ import { renderBookingInbox, renderCalendarLocation, renderMailSettings } from '
 import type { BookingView, CalendarLocationSettings, MailSettings, PanelActions, RequestFilter } from './admin-m2';
 import { renderCalendarConnections } from './admin-calendars';
 import type { CalendarConnections } from './admin-calendars';
+import { renderOpenSessions } from './admin-open';
+import type { OpenSettings } from './admin-open';
 import { inviteStatus } from './invite-status';
 import type { InviteState } from './invite-status';
 
@@ -36,6 +38,7 @@ function requestPhase(path: string): string {
   if (path.startsWith('/admin/requests')) return 'BOOKING_ADMIN';
   if (path.startsWith('/admin/mail')) return 'MAIL_ADMIN';
   if (path.startsWith('/admin/calendar-sources')) return 'CALENDAR_ADMIN';
+  if (path.startsWith('/admin/open-sessions') || path.startsWith('/admin/open-types')) return 'OPEN_ADMIN';
   const phases: Record<string, string> = { '/admin/setup/options': 'SETUP_START', '/admin/setup/verify': 'SETUP_VERIFY', '/admin/login/options': 'LOGIN_START', '/admin/login/verify': 'LOGIN_VERIFY', '/admin/login/password': 'PASSWORD_LOGIN', '/admin/password': 'PASSWORD_SETTINGS', '/admin/reauth/options': 'REAUTH_START', '/admin/reauth/verify': 'REAUTH_VERIFY', '/admin/me': 'SESSION_CHECK', '/admin/status': 'ADMIN_STATUS' };
   return phases[path] ?? 'ADMIN_API';
 }
@@ -55,6 +58,9 @@ function messageFor(error: unknown): string {
     if (error.code === 'PASSKEY_LOGIN_REQUIRED') return '请退出当前登录，然后使用通行密钥登录以管理密码。';
     if (error.code === 'PASSWORD_CHANGED') return '密码状态已更新。请重新打开「登录密码」，查看状态后再操作。';
     if (error.code === 'BOOKING_CHANGED') return '这条申请已更新。请刷新预约列表后再处理。';
+    if (error.code === 'OPEN_FULL') return '这个开放局的名额已满。请刷新预约列表。';
+    if (error.code === 'SLOT_CONFLICT' && error.phase === 'OPEN_ADMIN') return '开放局与已有日程或其他开放局重叠。请调整时间再发布。';
+    if (error.code === 'SLOT_UNAVAILABLE' && error.phase === 'OPEN_ADMIN') return '请选择未来 30 天内的时间，整段时长需在北京时间 09:00–21:00 内。';
     if (error.code === 'SLOT_CONFLICT') return '这个时间与站内已确认的预约重叠。请建议其他时间。';
     if (error.code === 'SLOT_UNAVAILABLE') return '这个时间已过去或超出申请范围。请选择未来工作日的其他时间。';
     if (error.code === 'INVALID_CITY') return '请填写不超过 24 个字符的城市名称，例如深圳或香港。';
@@ -77,7 +83,7 @@ function messageFor(error: unknown): string {
     if (error.code === 'MAILBOX_LIMIT') return '最多可添加 20 个邮箱。请先移除一个不用的邮箱。';
     if (error.code === 'MAILBOX_ALREADY_VERIFIED') return '这个邮箱已经验证。请刷新邮箱设置。';
     if (error.code === 'MAIL_SETTINGS_CHANGED') return '邮箱设置已更新。请重新打开「邮箱设置」后再操作。';
-    if (error.code === 'INVALID_INPUT' && ['BOOKING_ADMIN', 'MAIL_ADMIN', 'CALENDAR_ADMIN'].includes(error.phase)) return '请核对填写的内容后重试。';
+    if (error.code === 'INVALID_INPUT' && ['BOOKING_ADMIN', 'MAIL_ADMIN', 'CALENDAR_ADMIN', 'OPEN_ADMIN'].includes(error.phase)) return '请核对填写的内容后重试。';
     if (error.code === 'LAST_PASSKEY' || error.code === 'LAST_CREDENTIAL') return '至少需要保留一把通行密钥，请先添加另一把。';
     if (error.status === 503) return '管理服务暂时无法使用，请稍后重试。';
     if (error.status === 401 && error.phase === 'PASSWORD_LOGIN') return '密码验证未通过。请确认密码，或改用通行密钥。';
@@ -119,7 +125,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   let me: Me | null = null;
   const returnPrefix = '#/admin/calendar-return?';
   let calendarReturn = location.hash.startsWith(returnPrefix) ? new URLSearchParams(location.hash.slice(returnPrefix.length)) : null;
-  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' = calendarReturn ? 'calendars' : 'invites';
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' | 'open' = calendarReturn ? 'calendars' : 'invites';
   if (calendarReturn) history.replaceState(null, '', '#/admin');
   let requestFilter: RequestFilter = 'pending';
   let passwordEnabled = false;
@@ -462,6 +468,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     if (!me || !alive) return;
     const headings = {
       invites: ['邀请链接', '为每位受邀者设置可见内容与有效期。'],
+      open: ['开放局', '选活动类型和日期，发布可报名的活动。'],
       requests: ['预约申请', '处理待确认的申请，查看已确认的预约。'],
       mail: ['邮箱设置', '配置发信服务，验证接收预约通知和日历附件的邮箱。'],
       location: ['日历地点', '设置预约周历中的城市，按日期调整地点。'],
@@ -492,7 +499,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     });
   }
-  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars', version: number) {
+  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars' | 'open', version: number) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
     const isCurrent = () => rootIsCurrent(version) && me !== null;
@@ -509,6 +516,19 @@ export function renderAdmin(root: HTMLElement): () => void {
         const { requests } = await request<{ requests: BookingView[] }>(`/admin/requests?status=${filter}`);
         if (!isCurrent()) return;
         renderBookingInbox(content, requests, filter, actions, next => { requestFilter = next; showDashboard(); });
+        if (message) banner(message);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      await reload();
+    } else if (panel === 'open') {
+      const reload = async (message?: string) => {
+        const settings = await request<OpenSettings>('/admin/open-sessions');
+        if (!isCurrent()) return;
+        renderOpenSessions(content, settings, actions, filter => {
+          requestFilter = filter;
+          tab = 'requests';
+          showDashboard();
+        });
         if (message) banner(message);
       };
       const actions: PanelActions = { request, run, banner, isCurrent, reload };

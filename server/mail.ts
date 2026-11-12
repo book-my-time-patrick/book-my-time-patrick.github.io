@@ -107,15 +107,23 @@ async function messages(c: MailContext, row: BookingRow, route: MailRoute) {
   const notify = route.notification_address ?? delivery;
   const site = new URL(c.env.SITE_ORIGIN!);
   const time = dateLabel(row.start_at, row.end_at);
-  const meeting = row.meeting_type === 'online' ? '线上 / Online' : '线下 / In person';
+  const activity = row.open_session_id
+    ? await mailDb(c).prepare('SELECT title,location FROM open_sessions WHERE id=?')
+      .bind(row.open_session_id).first<{ title: string; location: string }>()
+    : null;
+  const meeting = activity ? [activity.title, activity.location].filter(Boolean).join(' · ')
+    : row.meeting_type === 'online' ? '线上 / Online' : '线下 / In person';
+  const contact = row.email ? { reply_to: row.email } : {};
+  const guestName = row.email ? `${row.name} <${row.email}>` : row.name;
   const mail = (to: string, status: CalendarStatus, summary: string) => {
-    const direct = row.source === 'direct';
+    const request = row.source === 'direct' || Boolean(activity && status !== 'TENTATIVE');
     const content = calendarFile({
-      uid: `${row.id}@${site.hostname}`, organizer: route.sender, recipient: to, summary,
+      uid: `${row.id}@${site.hostname}`, organizer: route.sender, recipient: to, summary: activity?.title ?? summary,
+      location: activity?.location,
       startAt: row.start_at, endAt: row.end_at, stamp: row.updated_at, sequence: row.sequence, status,
-      request: direct,
+      request,
     });
-    return calendarAttachment(content, direct ? (status === 'CANCELLED' ? 'CANCEL' : 'REQUEST') : undefined);
+    return calendarAttachment(content, request ? (status === 'CANCELLED' ? 'CANCEL' : 'REQUEST') : undefined);
   };
   type Job = { channel: string; message: Message };
   if (row.status === 'pending') {
@@ -123,11 +131,11 @@ async function messages(c: MailContext, row: BookingRow, route: MailRoute) {
     const token = `${value}.${await reviewSignature(c, value)}`;
     const actions = [
       { name: '确认 / Confirm', action: 'confirm' }, { name: '拒绝 / Decline', action: 'decline' },
-      { name: '建议其他时间 / Suggest another time', action: 'suggest' },
+      ...(activity ? [] : [{ name: '建议其他时间 / Suggest another time', action: 'suggest' }]),
     ].map(item => ({ ...item, url: `${site.origin}/#/review/${token}/${item.action}` }));
-    const intro = `收到一项预约申请，等待你确认。\nA new request is awaiting your decision.\n${row.name} <${row.email}>\n${time}\n${meeting}${row.notes ? `\n${row.notes}` : ''}`;
+    const intro = `收到一项预约申请，等待你确认。\nA new request is awaiting your decision.\n${guestName}\n${time}\n${meeting}${row.notes ? `\n${row.notes}` : ''}`;
     const base = {
-      subject: '新的预约申请 / New appointment request', reply_to: row.email,
+      subject: '新的预约申请 / New appointment request', ...contact,
       text: `${intro}\n\n${actions.map(item => `${item.name}\n${item.url}`).join('\n\n')}`,
       html: `<div><p>${escapeHtml(intro).replace(/\n/g, '<br>')}</p>${actions.map(item => `<p><a href="${escapeHtml(item.url)}" style="display:inline-block;padding:9px 14px;border:1px solid #003cc1;border-radius:5px;color:#003cc1">${escapeHtml(item.name)}</a></p>`).join('')}</div>`,
     };
@@ -137,16 +145,16 @@ async function messages(c: MailContext, row: BookingRow, route: MailRoute) {
   }
   const note = row.message ? `\n${row.message}` : '';
   const guest = (subject: string, body: string): Message => ({ to: [row.email], subject, text: `${body}\n${time}\n${meeting}${note}`, reply_to: notify });
-  if (row.status === 'declined') return [{ channel: 'guest', message: guest('预约申请未获确认 / Request declined', '这次预约申请未获确认。\nYour appointment request was declined.') }];
+  if (row.status === 'declined') return row.email ? [{ channel: 'guest', message: guest('预约申请未获确认 / Request declined', '这次预约申请未获确认。\nYour appointment request was declined.') }] : [];
   if (row.status === 'suggested') return [{ channel: 'guest', message: guest('建议另一个预约时间 / New time proposed', '以下是建议的时间。请回复本邮件确认是否方便。\nPlease reply to let us know if this time works for you.') }];
   const cancelled = row.status === 'cancelled';
   const status = cancelled ? 'CANCELLED' : 'CONFIRMED';
   const subject = cancelled ? '预约已取消 / Appointment cancelled' : '预约已确认 / Appointment confirmed';
   const jobs: Job[] = [{ channel: 'owner', message: {
-    to: [delivery], subject, reply_to: row.email, text: `${subject}\n${row.name} <${row.email}>\n${time}\n${meeting}${note}`,
+    to: [delivery], subject, ...contact, text: `${subject}\n${guestName}\n${time}\n${meeting}${note}`,
     attachments: [mail(delivery, status, '预约 / Appointment')],
   } }];
-  if (row.email.toLowerCase() !== delivery.toLowerCase()) jobs.push({ channel: 'guest', message: {
+  if (row.email && row.email.toLowerCase() !== delivery.toLowerCase()) jobs.push({ channel: 'guest', message: {
     ...guest(subject, subject), attachments: [mail(row.email, status, '预约 / Appointment')],
   } });
   return jobs;

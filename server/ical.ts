@@ -27,7 +27,7 @@ function fold(line: string): string {
 }
 
 export function calendarFile(event: {
-  uid: string; organizer: string; recipient: string; summary: string;
+  uid: string; organizer?: string; recipient?: string; summary: string; location?: string;
   startAt: number; endAt: number; stamp: number; sequence: number; status: CalendarStatus;
   request?: boolean;
 }): string {
@@ -38,11 +38,12 @@ export function calendarFile(event: {
     `METHOD:${method}`, 'BEGIN:VEVENT',
     `UID:${text(event.uid)}`, `DTSTAMP:${utc(event.stamp)}`,
     `DTSTART:${utc(event.startAt)}`, `DTEND:${utc(event.endAt)}`,
-    `ORGANIZER:${mailto(event.organizer)}`, `SUMMARY:${text(event.summary)}`,
+    ...(event.organizer ? [`ORGANIZER:${mailto(event.organizer)}`] : []),
+    `SUMMARY:${text(event.summary)}`, ...(event.location ? [`LOCATION:${text(event.location)}`] : []),
     `STATUS:${event.status}`, `SEQUENCE:${event.sequence}`, 'CLASS:PRIVATE',
     `TRANSP:${event.status === 'CONFIRMED' ? 'OPAQUE' : 'TRANSPARENT'}`,
   ];
-  if (method !== 'PUBLISH') lines.push(`ATTENDEE:${mailto(event.recipient)}`);
+  if (method !== 'PUBLISH' && event.recipient) lines.push(`ATTENDEE:${mailto(event.recipient)}`);
   lines.push('END:VEVENT', 'END:VCALENDAR');
   return `${lines.map(fold).join('\r\n')}\r\n`;
 }

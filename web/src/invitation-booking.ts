@@ -6,15 +6,21 @@ import { copyText, escapeHtml as e } from './ui';
 type Availability = 'available' | 'busy' | 'blocked';
 type BookingMode = 'request' | 'direct';
 type CalendarState = SlotState | Exclude<Availability, 'blocked'>;
-interface Slot { startAt: number; state: SlotState; availability?: Availability; bookableDurations?: number[] }
+interface Slot { startAt: number; state: SlotState; availability?: Availability; bookableDurations?: number[]; requestDurations?: number[] }
 interface Day { date: string; slots: Slot[]; city?: string }
+interface OpenSession {
+  id: string; title: string; emoji: string; color: 'blue' | 'plum' | 'green' | 'amber';
+  startAt: number; endAt: number; location: string; description: string; mapUrl: string;
+  capacity: number | null; remaining: number | null; approvalRequired: boolean; emailRequired: boolean;
+}
 interface Week {
   now: number; week: number; maxWeek: number; weekStart: string; canSubmit: boolean;
   days: Day[]; durations: readonly number[];
   availability?: 'ready' | 'unavailable'; canBook?: boolean; validUntil?: number;
+  openSessions?: OpenSession[];
 }
 interface Options {
-  showCalendar: boolean; showCity: boolean; hideBusy: boolean; allowRequest: boolean; allowDirect: boolean; preview: boolean;
+  showCalendar: boolean; showCity: boolean; hideBusy: boolean; allowRequest: boolean; allowDirect: boolean; allowOpen: boolean; preview: boolean;
   send: (path: string, body?: object, signal?: AbortSignal) => Promise<unknown>;
   unavailable: () => void;
 }
@@ -55,14 +61,26 @@ function readWeek(value: unknown): Week {
         || slot.startAt % step !== 0
         || (slot.availability !== undefined && !['available', 'busy', 'blocked'].includes(slot.availability))
         || (slot.bookableDurations !== undefined && (!Array.isArray(slot.bookableDurations)
-          || slot.bookableDurations.some(duration => !isDuration(duration)))))) throw new Error('Invalid calendar day');
+          || slot.bookableDurations.some(duration => !isDuration(duration))))
+        || (slot.requestDurations !== undefined && (!Array.isArray(slot.requestDurations)
+          || slot.requestDurations.some(duration => !isDuration(duration)))))) throw new Error('Invalid calendar day');
   }
   if (data.weekStart !== data.days[0].date) throw new Error('Invalid week start');
+  if (data.openSessions !== undefined && (!Array.isArray(data.openSessions) || data.openSessions.length > 200
+    || data.openSessions.some(session => !session || typeof session.id !== 'string' || !session.id || session.id.length > 128
+      || !Number.isSafeInteger(session.startAt) || !Number.isSafeInteger(session.endAt) || session.endAt <= session.startAt
+      || !Number.isFinite(new Date(session.startAt).getTime()) || !Number.isFinite(new Date(session.endAt).getTime())
+      || !['blue', 'plum', 'green', 'amber'].includes(session.color)
+      || ['title', 'emoji', 'location', 'description', 'mapUrl'].some(field => typeof session[field as keyof OpenSession] !== 'string')
+      || typeof session.approvalRequired !== 'boolean' || typeof session.emailRequired !== 'boolean'
+      || (session.capacity !== null && (!Number.isSafeInteger(session.capacity) || session.capacity < 1))
+      || (session.remaining !== null && (!Number.isSafeInteger(session.remaining) || session.remaining < 0))))) throw new Error('Invalid open sessions');
   return data;
 }
 
 export function renderInvitationBooking(root: HTMLElement, options: Options): () => void {
-  const { showCalendar, showCity, hideBusy, allowRequest, allowDirect, preview, send, unavailable } = options;
+  const { showCalendar, showCity, hideBusy, allowRequest, allowDirect, allowOpen, preview, send, unavailable } = options;
+  const hasCalendar = showCalendar || allowOpen;
   const hasForm = allowRequest || allowDirect;
   const navigation = `<div class="booking-period-nav" aria-label="切换日期范围" role="group">
     <div class="booking-period" aria-live="polite">
@@ -71,13 +89,13 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     </div>
     <div class="booking-period-controls">
       <button class="booking-nav-arrow" type="button" data-calendar-step="-1" aria-label="上一周" disabled><span aria-hidden="true">‹</span></button>
-      ${showCalendar ? '<button class="booking-nav-today" type="button" data-calendar-today disabled>今天</button>' : ''}
+      ${hasCalendar ? '<button class="booking-nav-today" type="button" data-calendar-today disabled>今天</button>' : ''}
       <button class="booking-nav-arrow" type="button" data-calendar-step="1" aria-label="下一周" disabled><span aria-hidden="true">›</span></button>
     </div>
   </div>`;
   const weekFeedback = '<p class="booking-feedback" data-calendar-message role="status" aria-live="polite"></p>';
   root.innerHTML = `
-    ${showCalendar ? `<section class="invitation-card booking-card booking-calendar-card" aria-labelledby="booking-calendar-title">
+    ${hasCalendar ? `<section class="invitation-card booking-card booking-calendar-card" aria-labelledby="booking-calendar-title">
       <div class="booking-section-head booking-calendar-head">
         <h2 id="booking-calendar-title">预约日历</h2>
         <div class="booking-view-toggle" role="group" aria-label="日历视图">
@@ -90,6 +108,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       <div class="booking-legend" aria-label="周历图例">
         ${hideBusy ? '' : '<span data-legend-busy hidden><i class="booking-key busy" aria-hidden="true"></i>已占用</span>'}
         ${hasForm ? '<span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
+        ${allowOpen ? '<span><i class="booking-key booking-open-key" aria-hidden="true">◇</i>开放局</span>' : ''}
         <span class="booking-legend-zone">UTC+8</span>
       </div>
       <p class="booking-calendar-hint" data-calendar-caption hidden></p>
@@ -97,14 +116,14 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     </section>` : ''}
     ${hasForm ? `<section class="invitation-card booking-card" data-booking-actions aria-labelledby="booking-request-title"${allowRequest ? '' : ' hidden'}>
       <div class="booking-section-head"><div><p class="eyebrow">BOOK A TIME</p><h2 id="booking-request-title" tabindex="-1">预约其他时间</h2></div><span class="booking-zone" data-mode-note>待邀请人确认</span></div>
-      ${showCalendar ? '' : navigation + weekFeedback}
+      ${hasCalendar ? '' : navigation + weekFeedback}
       ${allowRequest && allowDirect ? `<div class="booking-view-toggle booking-mode-toggle" data-booking-modes role="group" aria-label="预约方式" hidden>
         <button type="button" data-booking-mode="request" aria-pressed="true">邮件申请</button>
         <button type="button" data-booking-mode="direct" aria-pressed="false">直接预约</button>
       </div>` : ''}
       <p class="booking-caption" data-mode-caption>请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。</p>
       <div data-request-content>
-        <form class="booking-form" method="post">
+        <form class="booking-form" data-request-form method="post">
           <fieldset class="booking-fields">
             <div class="booking-time-fields">
               <label>日期<select name="date" required disabled><option value="">选择日期</option></select></label>
@@ -130,7 +149,8 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
           <label class="booking-manual-copy" data-manual-copy hidden>请手动复制<textarea readonly rows="5"></textarea></label>
         </form>
       </div>
-    </section>` : ''}`;
+    </section>` : ''}
+    ${allowOpen ? '<dialog class="booking-open-dialog invitation-card" aria-labelledby="booking-open-title"><div data-open-content></div></dialog>' : ''}`;
 
   const calendar = root.querySelector<HTMLElement>('[data-calendar]');
   const feedback = root.querySelector<HTMLElement>('[data-calendar-message]')!;
@@ -148,7 +168,8 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const modeCaption = root.querySelector<HTMLElement>('[data-mode-caption]');
   const calendarCaption = root.querySelector<HTMLElement>('[data-calendar-caption]');
   const busyLegend = root.querySelector<HTMLElement>('[data-legend-busy]');
-  const form = root.querySelector<HTMLFormElement>('form');
+  const form = root.querySelector<HTMLFormElement>('[data-request-form]');
+  const openDialog = root.querySelector<HTMLDialogElement>('.booking-open-dialog');
   const dateField = form?.querySelector<HTMLSelectElement>('[name="date"]');
   const timeField = form?.querySelector<HTMLSelectElement>('[name="startAt"]');
   const durationField = form?.querySelector<HTMLSelectElement>('[name="duration"]');
@@ -172,15 +193,21 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   let submitting = false;
   let submitted = false;
   const compactWeek = window.matchMedia('(max-width: 640px)');
-  let view: 'week' | 'day' = showCalendar && compactWeek.matches ? 'day' : 'week';
+  let view: 'week' | 'day' = hasCalendar && compactWeek.matches ? 'day' : 'week';
   let visibleDay = '';
   let selectedDate = '';
   let selectedStart = 0;
   let selectedDuration = 60;
   const lastSubmissions: Partial<Record<BookingMode, { body: string; id: string }>> = {};
   let lastTick = 0;
+  let selectedOpen: OpenSession | undefined;
+  let openSubmitting = false;
+  let openReceipt = false;
+  let calendarDownload: string | undefined;
+  const openSubmissions = new Map<string, { body: string; id: string }>();
 
   const now = () => week ? week.now + performance.now() - readAt : Date.now();
+  const openSessions = () => allowOpen && weekVerified ? (week?.openSessions ?? []).filter(session => session.startAt > now()) : [];
   const availabilityReady = () => showCalendar && weekVerified && (week?.availability === 'ready' || week?.canBook === true)
     && (week.validUntil === undefined || now() < week.validUntil);
   const directSelectable = () => allowDirect && availabilityReady() && (preview || week?.canBook === true);
@@ -197,7 +224,9 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       const slot = week?.days.find(day => day.date === selectedDate)?.slots.find(item => item.startAt === selectedStart);
       return lengths.filter(length => slot?.bookableDurations?.includes(length));
     }
-    return lengths.filter(length => !selectedStart || isRequestSlot(selectedStart, length, now()));
+    const slot = week?.days.find(day => day.date === selectedDate)?.slots.find(item => item.startAt === selectedStart);
+    return lengths.filter(length => !selectedStart || (isRequestSlot(selectedStart, length, now())
+      && (slot?.requestDurations === undefined || slot.requestDurations.includes(length))));
   }
   const hasValidSelection = () => selectedStart > now() && durations().includes(selectedDuration)
     && availableSlots(week?.days.find(day => day.date === selectedDate)).some(slot => slot.startAt === selectedStart);
@@ -209,22 +238,23 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   function updateControls() {
+    const busy = submitting || openSubmitting;
     const index = week?.days.findIndex(day => day.date === visibleDay) ?? 0;
     const unit = view === 'day' ? '天' : '周';
     previous.setAttribute('aria-label', `上一${unit}`);
     next.setAttribute('aria-label', `下一${unit}`);
-    previous.disabled = submitting || !week || (week.week === 0 && (view === 'week' || index <= 0));
-    next.disabled = submitting || !week || (week.week === week.maxWeek && (view === 'week' || index === week.days.length - 1));
-    if (todayButton) todayButton.disabled = submitting || !week || (week.week === 0 && (view === 'week' || visibleDay === bookingDate(now())));
+    previous.disabled = busy || !week || (week.week === 0 && (view === 'week' || index <= 0));
+    next.disabled = busy || !week || (week.week === week.maxWeek && (view === 'week' || index === week.days.length - 1));
+    if (todayButton) todayButton.disabled = busy || !week || (week.week === 0 && (view === 'week' || visibleDay === bookingDate(now())));
     for (const button of viewButtons) {
       button.setAttribute('aria-pressed', String(button.dataset.calendarView === view));
-      button.disabled = submitting;
+      button.disabled = busy;
     }
     if (actionCard) actionCard.hidden = !allowRequest && !directOffered;
     if (modeToggle) modeToggle.hidden = !directOffered || submitted;
     for (const button of modeButtons) {
       button.setAttribute('aria-pressed', String(button.dataset.bookingMode === mode));
-      button.disabled = submitting;
+      button.disabled = busy;
     }
     const direct = mode === 'direct';
     if (actionTitle) actionTitle.textContent = direct ? '直接预约' : '预约其他时间';
@@ -236,7 +266,8 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       let caption = '';
       if (direct && directSelectable()) caption = '点按可预约的空白时段选择时间。';
       else if (allowRequest) caption = '点按未来工作日的时段提出申请，由邀请人确认。';
-      else if (week && !weekRequest && !availabilityReady()) caption = '忙闲信息暂未同步。';
+      else if (showCalendar && week && !weekRequest && !availabilityReady()) caption = '忙闲信息暂未同步。';
+      if (allowOpen) caption += `${caption ? ' ' : ''}点按开放局查看详情并报名。`;
       calendarCaption.textContent = caption;
       calendarCaption.hidden = !caption || submitted;
     }
@@ -258,6 +289,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         : '暂时无法确认在线申请权限。可复制申请文字发给对方。';
       requestState.textContent = notice;
     }
+    updateOpenControls();
   }
 
   function syncForm() {
@@ -321,6 +353,174 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     return city ? `<span class="booking-location-label" title="${e(city)}">${pin}<span>${e(city)}</span></span>` : '';
   }
 
+  function sessionCapacity(session: OpenSession) {
+    return session.remaining === null ? '名额不限' : session.remaining === 0 ? '已约满' : `剩余 ${session.remaining} 个名额`;
+  }
+
+  function openSessionList(days: Day[]) {
+    if (!allowOpen || !weekVerified) return '';
+    const sessions = openSessions().filter(session => days.some(day => day.date === bookingDate(session.startAt)));
+    if (!sessions.length) return showCalendar || allowRequest ? '' : '<p class="booking-caption">这段日期暂时没有开放局。</p>';
+    return `<div class="booking-open-list" aria-label="开放局列表">${sessions.map(session => `<button type="button"
+      class="booking-open-card booking-open-slot--${session.color}${session.remaining === 0 ? ' booking-open-full' : ''}"
+      data-open-session="${e(session.id)}"${session.remaining === 0 ? ' disabled' : ''}>
+      <strong>${e(session.emoji)} ${e(session.title)}</strong>
+      <span>${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}</span>
+      <span class="booking-open-capacity">${sessionCapacity(session)}${session.approvalRequired ? ' · 需确认' : ''}</span>
+    </button>`).join('')}</div>`;
+  }
+
+  function showOpenMessage(text: string, error = false) {
+    const status = openDialog?.querySelector<HTMLElement>('[data-open-message]');
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('error', error);
+  }
+
+  function updateOpenControls() {
+    if (!openDialog?.open || !selectedOpen || openReceipt) return;
+    const current = openSessions().find(session => session.id === selectedOpen!.id);
+    const fields = openDialog.querySelector<HTMLFieldSetElement>('fieldset');
+    const button = openDialog.querySelector<HTMLButtonElement>('[type="submit"]');
+    const close = openDialog.querySelector<HTMLButtonElement>('[data-open-close]');
+    const capacity = openDialog.querySelector<HTMLElement>('[data-open-capacity]');
+    if (fields) fields.disabled = openSubmitting;
+    if (button) {
+      button.disabled = openSubmitting || preview || !current || current.remaining === 0;
+      button.textContent = openSubmitting ? '正在提交…' : selectedOpen.approvalRequired ? '提交预约申请' : '确认预约';
+    }
+    if (close) close.disabled = openSubmitting;
+    if (capacity) capacity.textContent = current ? sessionCapacity(current) : weekRequest ? '正在核对场次信息…' : '这场活动暂时无法预约。';
+  }
+
+  function showOpenSession(id: string) {
+    const session = openSessions().find(item => item.id === id);
+    if (!openDialog || !session || session.remaining === 0 || submitting || openSubmitting) return;
+    selectedOpen = session;
+    openReceipt = false;
+    if (calendarDownload) URL.revokeObjectURL(calendarDownload);
+    calendarDownload = undefined;
+    let mapUrl = '';
+    try {
+      const url = new URL(session.mapUrl);
+      if (url.protocol === 'https:' && !url.username && !url.password) mapUrl = url.href;
+    } catch { /* A map link is optional. */ }
+    openDialog.innerHTML = `<div class="booking-section-head"><h2 id="booking-open-title">${e(session.emoji)} ${e(session.title)}</h2>
+      <button class="text-button" type="button" data-open-close aria-label="关闭开放局详情">关闭</button></div>
+      <div class="booking-open-details">
+        <p>${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}（UTC+8）</p>
+        ${session.location ? `<p>${e(session.location)}</p>` : ''}
+        ${session.description ? `<p class="booking-open-description">${e(session.description)}</p>` : ''}
+        ${mapUrl ? `<p><a href="${e(mapUrl)}" target="_blank" rel="noopener noreferrer">查看地图 ↗</a></p>` : ''}
+        <p class="booking-open-capacity" data-open-capacity>${sessionCapacity(session)}</p>
+      </div>
+      <form class="booking-form" data-open-form method="post">
+        <fieldset class="booking-fields">
+          <label>姓名<input name="name" required maxlength="80" autocomplete="name"></label>
+          <label>邮箱${session.emailRequired ? '' : '（选填）'}<input name="email" type="email" maxlength="254" autocomplete="email"${session.emailRequired ? ' required' : ''}></label>
+          <label class="booking-honeypot" aria-hidden="true">请留空<input name="website" tabindex="-1" autocomplete="off"></label>
+        </fieldset>
+        <p class="booking-caption">${preview ? '当前为预览，无法提交。' : session.approvalRequired ? '提交后请等待邀请人确认。' : '确认后预约立即生效。'}${!preview && !session.emailRequired ? ' 留下邮箱可收到确认通知。' : ''}</p>
+        <div class="booking-actions"><button class="primary" type="submit">${session.approvalRequired ? '提交预约申请' : '确认预约'}</button></div>
+        <p class="booking-message" data-open-message role="status" aria-live="polite"></p>
+      </form>`;
+    if (!openDialog.open) openDialog.showModal();
+    updateOpenControls();
+  }
+
+  async function submitOpenSession(session: OpenSession, draft: { name: string; email?: string; website: string }, submissionId: string) {
+    if (!alive || !openDialog || !weekVerified || preview || openSubmitting || openReceipt) return;
+    openSubmitting = true;
+    showOpenMessage('正在提交…');
+    updateControls();
+    let refresh = false;
+    try {
+      const result = await send(`/invite/open/${encodeURIComponent(session.id)}`, { ...draft, submissionId });
+      if (!alive) return;
+      if (!result || typeof result !== 'object' || !('ok' in result) || result.ok !== true
+        || !('status' in result) || !['confirmed', 'pending'].includes(String(result.status))) throw new Error('Invalid confirmation');
+      openReceipt = true;
+      openSubmissions.delete(session.id);
+      const confirmed = result.status === 'confirmed';
+      if (confirmed && 'calendar' in result && typeof result.calendar === 'string' && result.calendar.length < 128 * 1024
+        && result.calendar.startsWith('BEGIN:VCALENDAR')) {
+        calendarDownload = URL.createObjectURL(new Blob([result.calendar], { type: 'text/calendar;charset=utf-8' }));
+      }
+      const mail = confirmed && draft.email ? 'mailStatus' in result && result.mailStatus === 'sent'
+        ? '确认通知已发出。' : '邮件暂未确认发出，请保留当前结果。' : '';
+      openDialog.innerHTML = `<div class="booking-section-head"><h2 id="booking-open-title">${confirmed ? '预约已确认' : '已收到预约申请'}</h2>
+        <button class="text-button" type="button" data-open-close>关闭</button></div>
+        <div class="booking-receipt booking-open-receipt" role="status"><strong>${e(session.emoji)} ${e(session.title)}</strong>
+          <p>${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}（UTC+8）</p>
+          <p>${confirmed ? '预约已生效。' : '请等待邀请人确认。'}${mail}</p>
+          ${calendarDownload ? `<p><a class="text-button" href="${e(calendarDownload)}" download="appointment.ics">添加到日历</a></p>` : ''}
+        </div>`;
+      refresh = true;
+    } catch (error) {
+      if (!alive) return;
+      if (error instanceof InvitationError && error.status === 401) { unavailable(); return; }
+      if (error instanceof InvitationError && error.code === 'OPEN_FULL') {
+        showOpenMessage('这场活动刚刚约满，请选择其他场次。', true);
+        refresh = true;
+      } else if (error instanceof InvitationError && (error.status === 404 || error.code === 'SLOT_UNAVAILABLE')) {
+        showOpenMessage('这场活动已无法预约，请选择其他场次。', true);
+        refresh = true;
+      } else if (error instanceof InvitationError && error.code === 'REQUESTS_DISABLED') {
+        showOpenMessage('邀请人暂未开放在线预约，请稍后再试。', true);
+        refresh = true;
+      } else if (error instanceof InvitationError && error.status === 429) {
+        showOpenMessage('预约操作过于频繁，请稍后再试。', true);
+      } else if (error instanceof InvitationError && error.code === 'SUBMISSION_CHANGED') {
+        openSubmissions.delete(session.id);
+        showOpenMessage('信息与原提交不一致，请核对后重新提交。', true);
+      } else if (error instanceof InvitationError && error.status === 400) {
+        showOpenMessage('请检查姓名和邮箱后重试。', true);
+      } else {
+        showOpenMessage('暂时无法确认预约结果，请重新核对这次提交。', true);
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'text-button'; retry.textContent = '重新确认提交';
+        retry.addEventListener('click', () => void submitOpenSession(session, draft, submissionId));
+        openDialog.querySelector('[data-open-message]')?.append(retry);
+      }
+    } finally {
+      openSubmitting = false;
+      if (alive) {
+        updateControls();
+        if (refresh && week) void loadWeek(week.week);
+      }
+    }
+  }
+
+  openDialog?.addEventListener('click', event => {
+    if (!openSubmitting && (event.target as Element).closest('[data-open-close]')) openDialog.close();
+  });
+  openDialog?.addEventListener('cancel', event => { if (openSubmitting) event.preventDefault(); });
+  openDialog?.addEventListener('close', () => {
+    const id = selectedOpen?.id;
+    selectedOpen = undefined;
+    if (calendarDownload) URL.revokeObjectURL(calendarDownload);
+    calendarDownload = undefined;
+    if (id) calendar?.querySelector<HTMLButtonElement>(`button[data-open-session="${CSS.escape(id)}"]:not(:disabled)`)?.focus({ preventScroll: true });
+  });
+  openDialog?.addEventListener('submit', event => {
+    event.preventDefault();
+    const form = (event.target as HTMLFormElement);
+    const session = openSessions().find(item => item.id === selectedOpen?.id);
+    if (!session || session.remaining === 0 || preview || openSubmitting || openReceipt || !form.reportValidity()) return;
+    const fields = new FormData(form);
+    const name = String(fields.get('name') ?? '').trim();
+    const inputEmail = String(fields.get('email') ?? '').trim();
+    const email = inputEmail ? parseEmailAddress(inputEmail) : undefined;
+    if (!name || (inputEmail && !email) || (session.emailRequired && !email)) {
+      showOpenMessage('请填写姓名，并检查邮箱是否完整。', true);
+      return;
+    }
+    const draft = { name, ...(email ? { email } : {}), website: String(fields.get('website') ?? '') };
+    const body = JSON.stringify(draft);
+    if (openSubmissions.get(session.id)?.body !== body) openSubmissions.set(session.id, { body, id: crypto.randomUUID() });
+    void submitOpenSession(session, draft, openSubmissions.get(session.id)!.id);
+  });
+
   function drawCalendar() {
     if (!week) return;
     const instant = now();
@@ -343,7 +543,18 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     };
     const showSelection = Boolean(selectedStart && (mode !== 'direct' || showAvailability));
     const inSelection = (startAt: number) => showSelection && startAt >= selectedStart && startAt < selectedEnd;
+    const sessions = openSessions();
     const slotMarkup = (day: Day, startAt: number, row: number) => {
+      const session = sessions.find(item => item.startAt < startAt + step && item.endAt > startAt);
+      if (session) {
+        const first = row === 0 || session.startAt >= startAt;
+        const last = row === 23 || session.endAt <= startAt + step;
+        const label = `${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)} ${session.title}，${sessionCapacity(session)}`;
+        return `<button type="button" class="booking-slot booking-open-slot booking-open-slot--${session.color}${session.remaining === 0 ? ' booking-open-full' : ''}${first ? '' : ' joins-before'}${last ? '' : ' joins-after'}"
+          data-open-session="${e(session.id)}" title="${e(label)}" aria-label="${e(label)}"${first ? '' : ' tabindex="-1"'}${session.remaining === 0 ? ' disabled' : ''}>
+          ${first ? `<span><span class="booking-open-slot-title">${e(session.emoji)} ${e(session.title)}</span><small class="booking-open-slot-time">${time(session.startAt)}–${time(session.endAt)}</small>${session.remaining === 0 ? '<span class="booking-open-slot-status">已约满</span>' : ''}</span>` : ''}
+        </button>`;
+      }
       const slot = slots.get(startAt);
       const state = stateAt(startAt);
       const chosen = Boolean(slot && canChoose(slot) && !submitted);
@@ -375,9 +586,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         const base = dayStart(day.date);
         const segments = Array.from({ length: 24 }, (_, index) => {
           const start = base + index * step;
+          if (sessions.some(session => session.startAt < start + step && session.endAt > start)) return 'booking-open-track';
           return inSelection(start) ? 'selected' : stateAt(start);
         });
-        const state = segments.includes('selected') ? '已选择' : segments.includes('available') ? '有空闲'
+        const daySessions = sessions.filter(session => bookingDate(session.startAt) === day.date);
+        const state = daySessions.length ? `${daySessions.length} 场开放局` : segments.includes('selected') ? '已选择' : segments.includes('available') ? '有空闲'
           : segments.includes('busy') ? '有占用' : segments.includes('request') ? '可申请'
           : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
         const title = `${weekdays[index]} ${shortDate(day.date)} ${state}${city ? ` ${city}` : ''}，查看当天`;
@@ -388,7 +601,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
           <span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span>
         </button>`;
       }).join('');
-      calendar.innerHTML = `<div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${selection}`;
+      calendar.innerHTML = `<div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${openSessionList(days)}${selection}`;
       return;
     }
     const dayView = view === 'day';
@@ -415,6 +628,13 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   function syncSelection() { syncForm(); drawCalendar(); updateControls(); }
 
+  function scheduleExpiry() {
+    window.clearTimeout(expiryTimer);
+    const deadlines = openSessions().map(session => session.startAt);
+    if (availabilityReady() && week?.validUntil !== undefined) deadlines.push(week.validUntil);
+    if (deadlines.length) expiryTimer = window.setTimeout(refreshClock, Math.max(1, Math.ceil(Math.min(...deadlines) - now())));
+  }
+
   function setWeek(data: Week, edge?: 'first' | 'last') {
     const sameWeek = week?.weekStart === data.weekStart;
     const active = document.activeElement;
@@ -432,10 +652,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     }
     readAt = performance.now();
     lastTick = Math.floor(now() / step);
-    window.clearTimeout(expiryTimer);
-    if (availabilityReady() && data.validUntil !== undefined) {
-      expiryTimer = window.setTimeout(refreshClock, Math.ceil(data.validUntil - now()));
-    }
+    scheduleExpiry();
     syncSelection();
     if (focused && focusKey) {
       const value = CSS.escape(focused.getAttribute(focusKey)!);
@@ -444,7 +661,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   async function loadWeek(offset: number, edge?: 'first' | 'last') {
-    if (!alive || submitting) return;
+    if (!alive || submitting || openSubmitting) return;
     weekRequest?.abort();
     const request = new AbortController();
     weekRequest = request;
@@ -523,11 +740,13 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     syncSelection();
   });
   calendar?.addEventListener('click', event => {
-    if (submitting) return;
+    if (submitting || openSubmitting) return;
     const target = (event.target as Element).closest<HTMLButtonElement>('button');
     if (!target) return;
     const date = target.dataset.day ?? target.dataset.openDay;
-    if (date) {
+    if (target.dataset.openSession) {
+      showOpenSession(target.dataset.openSession);
+    } else if (date) {
       showDay(date);
       calendar.querySelector<HTMLButtonElement>(`[data-day="${visibleDay}"]`)?.focus({ preventScroll: true });
     } else if (target.dataset.slot) {
@@ -661,17 +880,22 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   });
 
   function refreshClock() {
-    if (!alive || !week || submitting || document.hidden) return;
+    if (!alive || !week || submitting || openSubmitting || document.hidden) return;
     if (week.days.at(-1)!.date < bookingDate(now())) { void loadWeek(0); return; }
     if (!weekRequest && weekVerified && week.availability === 'ready' && week.validUntil !== undefined && now() >= week.validUntil) {
       void loadWeek(week.week);
       return;
     }
+    if (week.openSessions?.some(session => session.startAt <= now())) {
+      week.openSessions = week.openSessions.filter(session => session.startAt > now());
+      syncSelection();
+      scheduleExpiry();
+    }
     const tick = Math.floor(now() / step);
     if (tick !== lastTick) { lastTick = tick; syncSelection(); }
   }
   const redrawWeek = () => { if (view === 'week') drawCalendar(); };
-  if (showCalendar) compactWeek.addEventListener('change', redrawWeek);
+  if (hasCalendar) compactWeek.addEventListener('change', redrawWeek);
   const timer = window.setInterval(refreshClock, 30_000);
   document.addEventListener('visibilitychange', refreshClock);
   void loadWeek(0);
@@ -681,7 +905,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     weekRequest = undefined;
     delete lastSubmissions.request;
     delete lastSubmissions.direct;
-    if (showCalendar) compactWeek.removeEventListener('change', redrawWeek);
+    openSubmissions.clear();
+    if (calendarDownload) URL.revokeObjectURL(calendarDownload);
+    openDialog?.close();
+    openDialog?.remove();
+    if (hasCalendar) compactWeek.removeEventListener('change', redrawWeek);
     window.clearTimeout(expiryTimer);
     window.clearInterval(timer);
     document.removeEventListener('visibilitychange', refreshClock);

@@ -9,6 +9,8 @@ type MailStatus = 'pending' | 'sent' | 'failed' | 'unconfigured';
 export interface BookingView {
   id: string;
   inviteId: string;
+  source?: 'request' | 'direct' | 'open';
+  openTitle?: string;
   name: string;
   email: string;
   startAt: number;
@@ -87,7 +89,7 @@ export function renderBookingInbox(
       <nav class="admin-actions admin-m2-filters" aria-label="按预约状态查看">
         ${Object.entries(filterLabels).map(([key, label]) => `<button class="secondary" type="button" data-filter="${key}" aria-pressed="${filter === key}">${label}</button>`).join('')}
       </nav>
-      <p class="admin-copy">时间统一显示为北京时间（UTC+8）。确认前请核对你的日历，待确认申请不占用时段。</p>
+      <p class="admin-copy">时间统一显示为北京时间（UTC+8）。确认前请核对你的日历，待确认的普通申请不占用时段。</p>
       <div class="admin-list" data-bookings></div>
     </section>`;
   content.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach(button => {
@@ -104,9 +106,14 @@ export function renderBookingInbox(
     return;
   }
   for (const request of requests) {
+    const isOpen = request.source === 'open';
+    const sourceLabel = isOpen ? ['开放局', request.openTitle].filter(Boolean).join(' · ')
+      : request.meetingType === 'online' ? '线上' : '线下';
     const canDecide = request.status === 'pending' || request.status === 'suggested';
     const canChange = request.status === 'confirmed' && request.startAt > Date.now();
-    const decisions: Decision[] = canDecide ? ['confirm', 'suggest', 'decline'] : canChange ? ['reschedule', 'cancel'] : [];
+    let decisions: Decision[] = [];
+    if (canDecide) decisions = isOpen ? ['confirm', 'decline'] : ['confirm', 'suggest', 'decline'];
+    else if (canChange) decisions = isOpen ? ['cancel'] : ['reschedule', 'cancel'];
     const item = document.createElement('article');
     item.className = 'admin-item';
     item.innerHTML = `
@@ -115,7 +122,7 @@ export function renderBookingInbox(
         <span class="admin-pill${request.status === 'confirmed' || canDecide ? '' : ' muted'}">${e(bookingLabels[request.status])}</span>
       </div>
       <p class="admin-m2-time">${e(dateAndTime.format(request.startAt))}–${e(timeOnly.format(request.endAt))}</p>
-      <p class="admin-item-description">${e(request.email)} · ${request.meetingType === 'online' ? '线上' : '线下'}</p>
+      <p class="admin-item-description">${e(request.email || '未提供邮箱')} · ${e(sourceLabel)}</p>
       ${request.notes ? `<p class="admin-item-description admin-m2-notes">访客备注 · ${e(request.notes)}</p>` : ''}
       ${request.message ? `<p class="admin-item-description admin-m2-notes">处理留言 · ${e(request.message)}</p>` : ''}
       <div class="admin-item-meta">
@@ -180,10 +187,18 @@ function showDecisionForm(editor: HTMLElement, booking: BookingView, decision: D
       input.startAt = startAt;
       input.duration = duration;
     }
-    if (decision === 'cancel' && !confirm('取消后将释放该预约时段，并通知受邀者。确定取消预约吗？')) return;
-    if (decision === 'decline' && !confirm('确定拒绝这条申请并通知受邀者吗？')) return;
-    const dataAfterDecision = await actions.request<{ request: BookingView }>(`/admin/requests/${encodeURIComponent(booking.id)}/decision`, input);
-    if (actions.isCurrent()) await actions.reload(`${decisionResults[decision]}${mailLabels[dataAfterDecision.request.mailStatus]}。`);
+    if (decision === 'cancel' && !confirm(booking.source === 'open' ? '取消后将释放一个开放局名额。确定取消预约吗？' : '取消后将释放该预约时段，并通知受邀者。确定取消预约吗？')) return;
+    if (decision === 'decline' && !confirm(booking.email ? '确定拒绝这条申请并通知受邀者吗？' : '确定拒绝这条申请吗？')) return;
+    try {
+      const dataAfterDecision = await actions.request<{ request: BookingView }>(`/admin/requests/${encodeURIComponent(booking.id)}/decision`, input);
+      if (actions.isCurrent()) await actions.reload(`${decisionResults[decision]}${mailLabels[dataAfterDecision.request.mailStatus]}。`);
+    } catch (error) {
+      if (booking.source === 'open' && error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+        if (actions.isCurrent()) actions.banner('该开放局已开始或已停止接受预约。请刷新列表查看最新状态。', true);
+        return;
+      }
+      throw error;
+    }
   });
   form.querySelector<HTMLElement>('input, textarea')?.focus();
 }
