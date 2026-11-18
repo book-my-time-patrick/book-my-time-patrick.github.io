@@ -7,6 +7,7 @@ interface Invitation {
   expiresAt: string | number;
   permissions: { modules: string[]; modes: string[]; hideBusy?: boolean };
   profile: { displayName: string };
+  content?: Record<string, string>;
 }
 
 export function renderInvitation(root: HTMLElement, token: string): () => void {
@@ -61,6 +62,7 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
       const allowOpen = invitation.permissions.modes.includes('open');
       const showBooking = showCalendar || allowRequest || allowOpen;
       const modules = invitation.permissions.modules.filter(name => name !== 'calendar' && !(showCity && name === 'travel') && Object.hasOwn(moduleNames, name));
+      const shown = invitation.content && typeof invitation.content === 'object' ? invitation.content : {};
       const displayName = invitation.profile.displayName ? `${e(invitation.profile.displayName)} 的预约空间。` : '';
       const intro = allowOpen ? '查看开放局，选一场合适的活动见面。' : allowRequest ? '选一个合适的时间，留下信息，等待邀请人确认。' : showCalendar ? '查看本次邀请提供的预约时段。' : '请查看本次邀请提供的内容。';
       root.innerHTML = `<main class="invitation-page">
@@ -68,7 +70,7 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
         ${invitation.preview ? '<aside class="invitation-preview" role="status">受邀者预览 · 临时有效一小时<br>当前预览不计入访问记录，不会创建预约或发送邮件。</aside>' : ''}
         <section class="invitation-hero"><p class="eyebrow">YOUR INVITATION</p><h1>你的专属邀请。</h1><p>${displayName}${intro}</p><p class="admin-help">本次邀请有效至 ${e(formatTime(invitation.expiresAt))} · 当前设备时区</p></section>
         ${showBooking ? '<div id="invitation-booking"></div>' : ''}
-        ${modules.length ? `<div class="invitation-grid">${modules.map(name => `<section class="invitation-card"><h2>${e(moduleNames[name])}</h2><p>该内容正在准备中。</p></section>`).join('')}</div>` : ''}
+        ${modules.length ? `<div class="invitation-grid">${modules.map(name => `<section class="invitation-card"><h2>${e(moduleNames[name])}</h2>${shown[name] ? `<p class="invitation-text">${e(shown[name])}</p>` : '<p>该内容正在准备中。</p>'}</section>`).join('')}</div>` : ''}
         <footer class="admin-footer">专属邀请仅供受邀者使用，请勿公开转发。</footer>
       </main>`;
       if (showBooking) {
