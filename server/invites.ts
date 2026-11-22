@@ -2,6 +2,7 @@ import type { Context, Hono } from 'hono';
 import { overrideJson, readRules } from './booking-rules.js';
 import type { Environment } from './db.js';
 import { AuthError, requireAdmin } from './auth.js';
+import { publicProfile } from './profile.js';
 
 type Ctx = Context<{ Bindings: Environment }>;
 const modules = ['profile','calendar','travel','tracks','investments','contact'];
@@ -99,6 +100,7 @@ export function mountInvites(app:Hono<{Bindings:Environment}>) {
    const accepted=await database(c).prepare("UPDATE invites SET last_opened_at=?,open_count=open_count+1 WHERE id=? AND revoked_at IS NULL AND expires_at>? RETURNING id").bind(now,row.id,now).first();
    if(!accepted) return fail(404,'NOT_FOUND');
   }
-  return c.json({preview:row.kind==='preview',expiresAt:row.expires_at,permissions:invitationPermissions(row),profile:{displayName:''}});
+  const granted=invitationPermissions(row), shown=await publicProfile(database(c),granted.modules);
+  return c.json({preview:row.kind==='preview',expiresAt:row.expires_at,permissions:granted,profile:{displayName:shown.displayName},content:shown.content});
  });
 }

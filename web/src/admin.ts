@@ -10,6 +10,8 @@ import type { BookingView, CalendarLocationSettings, MailSettings, PanelActions,
 import { renderCalendarConnections } from './admin-calendars';
 import type { CalendarConnections } from './admin-calendars';
 import { renderOpenSessions } from './admin-open';
+import { renderProfile } from './admin-profile';
+import type { ProfileSettings } from './admin-profile';
 import type { OpenSettings } from './admin-open';
 import { inviteStatus } from './invite-status';
 import type { InviteState } from './invite-status';
@@ -131,7 +133,7 @@ export function renderAdmin(root: HTMLElement): () => void {
   const returnPrefix = '#/admin/calendar-return?';
   let calendarReturn = location.hash.startsWith(returnPrefix) ? new URLSearchParams(location.hash.slice(returnPrefix.length)) : null;
   let inviteRules = DEFAULT_RULES;
-  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' | 'open' | 'rules' = calendarReturn ? 'calendars' : 'invites';
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' | 'open' | 'rules' | 'profile' = calendarReturn ? 'calendars' : 'invites';
   if (calendarReturn) history.replaceState(null, '', '#/admin');
   let requestFilter: RequestFilter = 'pending';
   let passwordEnabled = false;
@@ -474,6 +476,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     if (!me || !alive) return;
     const headings = {
       invites: ['邀请链接', '为每位受邀者设置可见内容与有效期。'],
+      profile: ['个人展示', '编辑受邀者能看到的个人介绍、关注方向、投资经历和联系方式。'],
       open: ['开放局', '选活动类型和日期，发布可报名的活动。'],
       requests: ['预约申请', '处理待确认的申请，查看已确认的预约。'],
       mail: ['邮箱设置', '配置发信服务，验证接收预约通知和日历附件的邮箱。'],
@@ -506,7 +509,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     });
   }
-  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars' | 'open' | 'rules', version: number) {
+  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars' | 'open' | 'rules' | 'profile', version: number) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
     const isCurrent = () => rootIsCurrent(version) && me !== null;
@@ -531,6 +534,15 @@ export function renderAdmin(root: HTMLElement): () => void {
       const reload = async () => {
         const { rules } = await request<{ rules: BookingRules }>('/admin/booking-rules');
         if (isCurrent()) renderBookingRules(content, rules, actions);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      await reload();
+    } else if (panel === 'profile') {
+      const reload = async (message?: string) => {
+        const settings = await request<ProfileSettings>('/admin/profile');
+        if (!isCurrent()) return;
+        renderProfile(content, settings, actions);
+        if (message) banner(message);
       };
       const actions: PanelActions = { request, run, banner, isCurrent, reload };
       await reload();

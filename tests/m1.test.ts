@@ -444,7 +444,7 @@ test('M6 SQLite 在线快照能恢复 WAL 中的写入、通行密钥登录和�
     await h.request('/api/admin/booking-rules', 'PATCH', { stepMinutes: 15 });
     assert.ok((await stat(source + '-wal')).size > 0);
     const first = await backupScript(source, backup);
-    assert.match(first.stdout, /0010_admin_audit.sql/);
+    assert.match(first.stdout, /0011_profile_content\.sql/);
     assert.equal((await stat(backup)).mode & 0o777, 0o600);
     assert.equal((await h.request('/api/admin/booking-rules', 'PATCH', { stepMinutes: 30 })).response.status, 200);
     await assert.rejects(backupScript(source, backup), /目标已存在/);

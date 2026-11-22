@@ -158,3 +158,8 @@
 @media (max-width: 520px) {
   .admin-rule-fields { grid-template-columns: minmax(0, 1fr); }
 }
+
+.admin-page .admin-field textarea { width: 100%; min-height: 90px; border: 1px solid #dce2ed; border-radius: 7px; padding: 11px 12px; background: #fbfcff; color: #0b1220; font: inherit; font-size: 14px; line-height: 1.7; resize: vertical; }
+.admin-page .admin-field textarea:focus-visible { outline: 3px solid #aec5f4; outline-offset: 2px; }
+.admin-field [data-counter] { font-variant-numeric: tabular-nums; margin-left: 6px; }
+.invitation-card p.invitation-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; color: #2b3447; line-height: 1.9; }

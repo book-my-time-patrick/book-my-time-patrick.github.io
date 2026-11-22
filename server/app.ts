@@ -10,6 +10,7 @@ import { mountCalendarSources } from './calendar-sources.js';
 import { mountInvites } from './invites.js';
 import { mountMailSettings } from './mail-settings.js';
 import { mountOpenSessions } from './open-sessions.js';
+import { mountProfile } from './profile.js';
 import type { Environment } from './db.js';
 
 export type { Environment } from './db.js';
@@ -62,6 +63,7 @@ export function createApi() {
   mountCalendarLocation(app);
   mountCalendarSources(app);
   mountOpenSessions(app);
+  mountProfile(app);
   app.all('/api/*', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.all('/api', (context) => context.json({ error: 'NOT_FOUND' }, 404));
   app.get('/robots.txt', (context) => context.text('User-agent: *\nDisallow: /\n'));
