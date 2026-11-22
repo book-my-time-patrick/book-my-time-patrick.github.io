@@ -5,6 +5,7 @@ import type { SqlDatabase, SqlStatement, SqlResult } from './db.js';
 
 interface LocalSqlDatabase extends SqlDatabase {
   migrate(name: string, sql: string): void;
+  close(): void;
 }
 
 export function openSqlite(path: string): LocalSqlDatabase {
@@ -39,6 +40,7 @@ export function openSqlite(path: string): LocalSqlDatabase {
   }
   return {
     prepare(query) { return new Statement(query); },
+    close() { db.close(); },
     async exec(query) { db.exec(query); },
     migrate(name, sql) {
       transaction(() => {

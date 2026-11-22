@@ -1,12 +1,13 @@
 import './invitation-booking.css';
-import { bookingDate, isRequestSlot, parseEmailAddress, requestWeek, REQUEST_DURATIONS } from '../../shared/booking';
+import { parseEmailAddress } from '../../shared/booking';
+import { DEFAULT_RULES, clockOf, expired, ruleClock, ruleDate, ruleTimestamp, shiftDate, validZone } from '../../shared/booking-rules';
 import type { SlotState } from '../../shared/booking';
 import { copyText, escapeHtml as e } from './ui';
 
 type Availability = 'available' | 'busy' | 'blocked';
 type BookingMode = 'request' | 'direct';
 type CalendarState = SlotState | Exclude<Availability, 'blocked'>;
-interface Slot { startAt: number; state: SlotState; availability?: Availability; bookableDurations?: number[]; requestDurations?: number[] }
+interface Slot { startAt: number; localMinute: number; state: SlotState; availability?: Availability; bookableDurations?: number[]; requestDurations?: number[] }
 interface Day { date: string; slots: Slot[]; city?: string }
 interface OpenSession {
   id: string; title: string; emoji: string; color: 'blue' | 'plum' | 'green' | 'amber';
@@ -16,6 +17,7 @@ interface OpenSession {
 interface Week {
   now: number; week: number; maxWeek: number; weekStart: string; canSubmit: boolean;
   days: Day[]; durations: readonly number[];
+  grid: { start: number; end: number; stepMinutes: 15 | 30; timeZone: string; leadMinutes: number };
   availability?: 'ready' | 'unavailable'; canBook?: boolean; validUntil?: number;
   openSessions?: OpenSession[];
 }
@@ -30,22 +32,22 @@ export class InvitationError extends Error {
 }
 
 const minute = 60_000;
-const step = 30 * minute;
-const chinaOffset = 8 * 60 * minute;
 const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 const stateNames: Record<CalendarState, string> = { expired: '已过期', request: '可申请', unavailable: '未开放', available: '空闲', busy: '已占用' };
 const baseStates = ['expired', 'request', 'unavailable'];
-const isDuration = (duration: number) => REQUEST_DURATIONS.some(length => length === duration);
-const time = (instant: number) => new Date(instant + chinaOffset).toISOString().slice(11, 16);
+const isDuration = (duration: number) => Number.isInteger(duration) && duration >= 15 && duration <= 120 && duration % 15 === 0;
 const shortDate = (date: string) => `${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日`;
 const dateNumber = (date: string) => Number(date.slice(8, 10));
-const dayStart = (date: string) => Date.parse(`${date}T09:00:00+08:00`);
 const pin = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M15.5 8c0 4-5.5 8.4-5.5 8.4S4.5 12 4.5 8a5.5 5.5 0 1 1 11 0Z"/><circle cx="10" cy="8" r="1.7"/></svg>';
 
 function readWeek(value: unknown): Week {
   const data = value as Week | undefined;
-  if (!data || !Number.isSafeInteger(data.now) || !Number.isInteger(data.week) || !Number.isInteger(data.maxWeek)
-    || data.week < 0 || data.week > data.maxWeek || data.maxWeek > 6 || typeof data.canSubmit !== 'boolean'
+  const grid = data?.grid;
+  if (!grid || !validZone(grid.timeZone) || (grid.stepMinutes !== 15 && grid.stepMinutes !== 30)
+    || !Number.isInteger(grid.start) || grid.start < 0 || grid.start % grid.stepMinutes
+    || !Number.isInteger(grid.end) || grid.end <= grid.start || grid.end > 1440 || grid.end % grid.stepMinutes
+    || !Number.isInteger(grid.leadMinutes) || grid.leadMinutes < 0 || !data || !Number.isSafeInteger(data.now) || !Number.isInteger(data.week) || !Number.isInteger(data.maxWeek)
+    || data.week < 0 || data.week > data.maxWeek || data.maxWeek > 8 || typeof data.canSubmit !== 'boolean'
     || !Array.isArray(data.days) || data.days.length !== 7 || !Array.isArray(data.durations)
     || !data.durations.length || data.durations.some(duration => !isDuration(duration))
     || (data.availability !== undefined && !['ready', 'unavailable'].includes(data.availability))
@@ -54,11 +56,11 @@ function readWeek(value: unknown): Week {
     throw new Error('Invalid calendar');
   }
   for (const day of data.days) {
-    if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day.date) || !Number.isFinite(dayStart(day.date))
-      || !Array.isArray(day.slots) || day.slots.length > 24
+    if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day.date) || !Number.isFinite(Date.parse(day.date))
+      || !Array.isArray(day.slots) || day.slots.length > (grid.end - grid.start) / grid.stepMinutes
       || day.slots.some(slot => !slot || !Number.isSafeInteger(slot.startAt) || !baseStates.includes(slot.state)
-        || slot.startAt < dayStart(day.date) || slot.startAt >= dayStart(day.date) + 24 * step
-        || slot.startAt % step !== 0
+        || !Number.isFinite(new Date(slot.startAt).getTime()) || !Number.isInteger(slot.localMinute)
+        || slot.localMinute < grid.start || slot.localMinute >= grid.end || slot.localMinute % grid.stepMinutes
         || (slot.availability !== undefined && !['available', 'busy', 'blocked'].includes(slot.availability))
         || (slot.bookableDurations !== undefined && (!Array.isArray(slot.bookableDurations)
           || slot.bookableDurations.some(duration => !isDuration(duration))))
@@ -109,7 +111,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         ${hideBusy ? '' : '<span data-legend-busy hidden><i class="booking-key busy" aria-hidden="true"></i>已占用</span>'}
         ${hasForm ? '<span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
         ${allowOpen ? '<span><i class="booking-key booking-open-key" aria-hidden="true">◇</i>开放局</span>' : ''}
-        <span class="booking-legend-zone">UTC+8</span>
+        <span class="booking-legend-zone" data-booking-zone></span>
       </div>
       <p class="booking-calendar-hint" data-calendar-caption hidden></p>
       <div data-calendar class="booking-calendar" aria-busy="true"></div>
@@ -121,7 +123,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         <button type="button" data-booking-mode="request" aria-pressed="true">邮件申请</button>
         <button type="button" data-booking-mode="direct" aria-pressed="false">直接预约</button>
       </div>` : ''}
-      <p class="booking-caption" data-mode-caption>请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。</p>
+      <p class="booking-caption" data-mode-caption></p>
       <div data-request-content>
         <form class="booking-form" data-request-form method="post">
           <fieldset class="booking-fields">
@@ -165,6 +167,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const modeToggle = root.querySelector<HTMLElement>('[data-booking-modes]');
   const modeButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-booking-mode]')];
   const modeNote = root.querySelector<HTMLElement>('[data-mode-note]');
+  const zoneLegend = root.querySelector<HTMLElement>('[data-booking-zone]');
   const modeCaption = root.querySelector<HTMLElement>('[data-mode-caption]');
   const calendarCaption = root.querySelector<HTMLElement>('[data-calendar-caption]');
   const busyLegend = root.querySelector<HTMLElement>('[data-legend-busy]');
@@ -206,12 +209,17 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   let calendarDownload: string | undefined;
   const openSubmissions = new Map<string, { body: string; id: string }>();
 
+  const zone = () => week?.grid.timeZone ?? DEFAULT_RULES.timeZone;
+  const zoneLabel = () => zone() === DEFAULT_RULES.timeZone ? 'UTC+8' : zone();
+  const dateAt = (at: number) => ruleDate(at, zone());
+  const time = (at: number) => ruleClock(at, zone());
+  const stepMs = () => (week?.grid.stepMinutes ?? 30) * minute;
   const now = () => week ? week.now + performance.now() - readAt : Date.now();
   const openSessions = () => allowOpen && weekVerified ? (week?.openSessions ?? []).filter(session => session.startAt > now()) : [];
   const availabilityReady = () => showCalendar && weekVerified && (week?.availability === 'ready' || week?.canBook === true)
     && (week.validUntil === undefined || now() < week.validUntil);
   const directSelectable = () => allowDirect && availabilityReady() && (preview || week?.canBook === true);
-  const canChoose = (slot: Slot) => slot.startAt > now() && (mode === 'request'
+  const canChoose = (slot: Slot) => !expired(slot.startAt, now(), week?.grid.leadMinutes ?? 0) && (mode === 'request'
     ? allowRequest && slot.state === 'request'
     : directSelectable() && slot.availability === 'available' && Boolean(slot.bookableDurations?.length));
   const availableSlots = (day: Day | undefined) => day?.slots.filter(canChoose) ?? [];
@@ -225,8 +233,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       return lengths.filter(length => slot?.bookableDurations?.includes(length));
     }
     const slot = week?.days.find(day => day.date === selectedDate)?.slots.find(item => item.startAt === selectedStart);
-    return lengths.filter(length => !selectedStart || (isRequestSlot(selectedStart, length, now())
-      && (slot?.requestDurations === undefined || slot.requestDurations.includes(length))));
+    return lengths.filter(length => !selectedStart || slot?.requestDurations?.includes(length));
   }
   const hasValidSelection = () => selectedStart > now() && durations().includes(selectedDuration)
     && availableSlots(week?.days.find(day => day.date === selectedDate)).some(slot => slot.startAt === selectedStart);
@@ -245,7 +252,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     next.setAttribute('aria-label', `下一${unit}`);
     previous.disabled = busy || !week || (week.week === 0 && (view === 'week' || index <= 0));
     next.disabled = busy || !week || (week.week === week.maxWeek && (view === 'week' || index === week.days.length - 1));
-    if (todayButton) todayButton.disabled = busy || !week || (week.week === 0 && (view === 'week' || visibleDay === bookingDate(now())));
+    if (todayButton) todayButton.disabled = busy || !week || (week.week === 0 && (view === 'week' || visibleDay === dateAt(now())));
     for (const button of viewButtons) {
       button.setAttribute('aria-pressed', String(button.dataset.calendarView === view));
       button.disabled = busy;
@@ -259,13 +266,14 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const direct = mode === 'direct';
     if (actionTitle) actionTitle.textContent = direct ? '直接预约' : '预约其他时间';
     if (modeNote) modeNote.textContent = direct ? '提交后立即确认' : '待邀请人确认';
+    if (zoneLegend) zoneLegend.textContent = zoneLabel();
     if (modeCaption) modeCaption.textContent = direct
-      ? '请选择空闲时段（UTC+8），并留下收取预约确认的邮箱。'
-      : '请选择工作日的期望时间（UTC+8），并留下收取回复的邮箱。';
+      ? `请选择空闲时段（${zoneLabel()}），并留下收取预约确认的邮箱。`
+      : `请选择期望时间（${zoneLabel()}），并留下收取回复的邮箱。`;
     if (calendarCaption) {
       let caption = '';
       if (direct && directSelectable()) caption = '点按可预约的空白时段选择时间。';
-      else if (allowRequest) caption = '点按未来工作日的时段提出申请，由邀请人确认。';
+      else if (allowRequest) caption = '点按可申请的时段，由邀请人确认。';
       else if (showCalendar && week && !weekRequest && !availabilityReady()) caption = '忙闲信息暂未同步。';
       if (allowOpen) caption += `${caption ? ' ' : ''}点按开放局查看详情并报名。`;
       calendarCaption.textContent = caption;
@@ -316,11 +324,12 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     timeField.disabled = !slots.length;
     durationField.disabled = !lengths.length;
     if (choice) choice.textContent = selectedStart
-      ? `已选择 ${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedStart + selectedDuration * minute)}（UTC+8）`
+      ? `已选择 ${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedStart + selectedDuration * minute)}（${zoneLabel()}）`
       : '尚未选择时间';
     if (visitorTime) {
       const localStart = new Date(selectedStart);
-      visitorTime.hidden = !selectedStart || localStart.getTimezoneOffset() === -480;
+      visitorTime.hidden = !selectedStart || zone() === Intl.DateTimeFormat().resolvedOptions().timeZone
+        || (zone() === DEFAULT_RULES.timeZone && localStart.getTimezoneOffset() === -480);
       if (!visitorTime.hidden) {
         const localEnd = new Date(selectedStart + selectedDuration * minute);
         const formatter = new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -334,7 +343,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const year = week.weekStart.slice(0, 4);
     if (view === 'day' && currentDay) {
       const weekday = weekdays[week.days.indexOf(currentDay)];
-      range.textContent = `${shortDate(currentDay.date)} · ${weekday}${currentDay.date === bookingDate(now()) ? ' · 今天' : ''}`;
+      range.textContent = `${shortDate(currentDay.date)} · ${weekday}${currentDay.date === dateAt(now()) ? ' · 今天' : ''}`;
       periodNote.textContent = `${currentDay.date.slice(0, 4)} 年 ${Number(currentDay.date.slice(5, 7))} 月`;
       return;
     }
@@ -345,7 +354,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   function cityOf(day: Day) {
-    return weekVerified && showCity && day.date >= bookingDate(now()) && typeof day.city === 'string' ? day.city.trim() : '';
+    return weekVerified && showCity && day.date >= dateAt(now()) && typeof day.city === 'string' ? day.city.trim() : '';
   }
 
   function cityLabel(day: Day) {
@@ -359,13 +368,13 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   function openSessionList(days: Day[]) {
     if (!allowOpen || !weekVerified) return '';
-    const sessions = openSessions().filter(session => days.some(day => day.date === bookingDate(session.startAt)));
+    const sessions = openSessions().filter(session => days.some(day => day.date === dateAt(session.startAt)));
     if (!sessions.length) return showCalendar || allowRequest ? '' : '<p class="booking-caption">这段日期暂时没有开放局。</p>';
     return `<div class="booking-open-list" aria-label="开放局列表">${sessions.map(session => `<button type="button"
       class="booking-open-card booking-open-slot--${session.color}${session.remaining === 0 ? ' booking-open-full' : ''}"
       data-open-session="${e(session.id)}"${session.remaining === 0 ? ' disabled' : ''}>
       <strong>${e(session.emoji)} ${e(session.title)}</strong>
-      <span>${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}</span>
+      <span>${shortDate(dateAt(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}</span>
       <span class="booking-open-capacity">${sessionCapacity(session)}${session.approvalRequired ? ' · 需确认' : ''}</span>
     </button>`).join('')}</div>`;
   }
@@ -408,7 +417,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     openDialog.innerHTML = `<div class="booking-section-head"><h2 id="booking-open-title">${e(session.emoji)} ${e(session.title)}</h2>
       <button class="text-button" type="button" data-open-close aria-label="关闭开放局详情">关闭</button></div>
       <div class="booking-open-details">
-        <p>${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}（UTC+8）</p>
+        <p>${shortDate(dateAt(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}（${zoneLabel()}）</p>
         ${session.location ? `<p>${e(session.location)}</p>` : ''}
         ${session.description ? `<p class="booking-open-description">${e(session.description)}</p>` : ''}
         ${mapUrl ? `<p><a href="${e(mapUrl)}" target="_blank" rel="noopener noreferrer">查看地图 ↗</a></p>` : ''}
@@ -451,7 +460,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       openDialog.innerHTML = `<div class="booking-section-head"><h2 id="booking-open-title">${confirmed ? '预约已确认' : '已收到预约申请'}</h2>
         <button class="text-button" type="button" data-open-close>关闭</button></div>
         <div class="booking-receipt booking-open-receipt" role="status"><strong>${e(session.emoji)} ${e(session.title)}</strong>
-          <p>${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}（UTC+8）</p>
+          <p>${shortDate(dateAt(session.startAt))} ${time(session.startAt)}–${time(session.endAt)}（${zoneLabel()}）</p>
           <p>${confirmed ? '预约已生效。' : '请等待邀请人确认。'}${mail}</p>
           ${calendarDownload ? `<p><a class="text-button" href="${e(calendarDownload)}" download="appointment.ics">添加到日历</a></p>` : ''}
         </div>`;
@@ -524,18 +533,21 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   function drawCalendar() {
     if (!week) return;
     const instant = now();
-    const today = bookingDate(instant);
+    const today = dateAt(instant);
     const days = week.days;
     const currentDay = days.find(day => day.date === visibleDay) ?? days.find(day => day.date === today) ?? days[0];
     visibleDay = currentDay.date;
     drawPeriod(currentDay);
     if (!calendar) return;
-    const slots = new Map(days.flatMap(day => day.slots.map(slot => [slot.startAt, slot] as const)));
+    const { start, end, stepMinutes, leadMinutes } = week.grid;
+    const step = stepMs();
+    const rowCount = (end - start) / stepMinutes;
+    const daySlots = new Map(days.map(day => [day.date, new Map(day.slots.map(slot => [slot.localMinute, slot] as const))]));
     const showAvailability = availabilityReady();
     const selectedEnd = selectedStart + selectedDuration * minute;
-    const stateAt = (startAt: number): CalendarState => {
-      const slot = slots.get(startAt);
-      if (startAt <= instant || slot?.state === 'expired') return 'expired';
+    const stateAt = (slot: Slot | undefined): CalendarState => {
+      if (!slot) return 'unavailable';
+      if (expired(slot.startAt, instant, leadMinutes) || slot.state === 'expired') return 'expired';
       if (showAvailability && slot?.availability) {
         return slot.availability === 'blocked' || (slot.availability === 'busy' && hideBusy) ? 'unavailable' : slot.availability;
       }
@@ -544,19 +556,23 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const showSelection = Boolean(selectedStart && (mode !== 'direct' || showAvailability));
     const inSelection = (startAt: number) => showSelection && startAt >= selectedStart && startAt < selectedEnd;
     const sessions = openSessions();
-    const slotMarkup = (day: Day, startAt: number, row: number) => {
+    const slotMarkup = (day: Day, row: number) => {
+      const localMinute = start + row * stepMinutes;
+      const slots = daySlots.get(day.date)!;
+      const slot = slots.get(localMinute);
+      if (!slot) return '<span class="booking-slot unavailable" aria-label="该当地时间不存在"></span>';
+      const startAt = slot.startAt;
       const session = sessions.find(item => item.startAt < startAt + step && item.endAt > startAt);
       if (session) {
         const first = row === 0 || session.startAt >= startAt;
-        const last = row === 23 || session.endAt <= startAt + step;
-        const label = `${shortDate(bookingDate(session.startAt))} ${time(session.startAt)}–${time(session.endAt)} ${session.title}，${sessionCapacity(session)}`;
+        const last = row === rowCount - 1 || session.endAt <= startAt + step;
+        const label = `${shortDate(dateAt(session.startAt))} ${time(session.startAt)}–${time(session.endAt)} ${session.title}，${sessionCapacity(session)}`;
         return `<button type="button" class="booking-slot booking-open-slot booking-open-slot--${session.color}${session.remaining === 0 ? ' booking-open-full' : ''}${first ? '' : ' joins-before'}${last ? '' : ' joins-after'}"
           data-open-session="${e(session.id)}" title="${e(label)}" aria-label="${e(label)}"${first ? '' : ' tabindex="-1"'}${session.remaining === 0 ? ' disabled' : ''}>
           ${first ? `<span><span class="booking-open-slot-title">${e(session.emoji)} ${e(session.title)}</span><small class="booking-open-slot-time">${time(session.startAt)}–${time(session.endAt)}</small>${session.remaining === 0 ? '<span class="booking-open-slot-status">已约满</span>' : ''}</span>` : ''}
         </button>`;
       }
-      const slot = slots.get(startAt);
-      const state = stateAt(startAt);
+      const state = stateAt(slot);
       const chosen = Boolean(slot && canChoose(slot) && !submitted);
       const selected = state !== 'expired' && inSelection(startAt);
       const first = selected && startAt === selectedStart;
@@ -565,8 +581,8 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       const action = chosen && !selected && mode === 'request' && state !== 'request' ? '，可发邮件申请' : '';
       const label = `${shortDate(day.date)} ${time(startAt)} ${status}${action}`;
       const busy = state === 'busy' && !selected;
-      const joinBefore = busy && row > 0 && !inSelection(startAt - step) && stateAt(startAt - step) === 'busy';
-      const joinAfter = busy && row < 23 && !inSelection(startAt + step) && stateAt(startAt + step) === 'busy';
+      const joinBefore = busy && row > 0 && !inSelection(startAt - step) && stateAt(slots.get(localMinute - stepMinutes)) === 'busy';
+      const joinAfter = busy && row < rowCount - 1 && !inSelection(startAt + step) && stateAt(slots.get(localMinute + stepMinutes)) === 'busy';
       const contents = first ? `<span aria-hidden="true">✓ ${time(startAt)}</span>`
         : busy && !joinBefore ? '<span aria-hidden="true">已占用</span>'
         : chosen && !busy && !selected ? `<span class="booking-slot-time" aria-hidden="true">${time(startAt)}</span>` : '';
@@ -583,13 +599,13 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     if (view === 'week' && compactWeek.matches) {
       const overview = days.map((day, index) => {
         const city = cityOf(day);
-        const base = dayStart(day.date);
-        const segments = Array.from({ length: 24 }, (_, index) => {
-          const start = base + index * step;
-          if (sessions.some(session => session.startAt < start + step && session.endAt > start)) return 'booking-open-track';
-          return inSelection(start) ? 'selected' : stateAt(start);
+        const slots = daySlots.get(day.date)!;
+        const segments = Array.from({ length: rowCount }, (_, index) => {
+          const slot = slots.get(start + index * stepMinutes);
+          if (slot && sessions.some(session => session.startAt < slot.startAt + step && session.endAt > slot.startAt)) return 'booking-open-track';
+          return slot && inSelection(slot.startAt) ? 'selected' : stateAt(slot);
         });
-        const daySessions = sessions.filter(session => bookingDate(session.startAt) === day.date);
+        const daySessions = sessions.filter(session => dateAt(session.startAt) === day.date);
         const state = daySessions.length ? `${daySessions.length} 场开放局` : segments.includes('selected') ? '已选择' : segments.includes('available') ? '有空闲'
           : segments.includes('busy') ? '有占用' : segments.includes('request') ? '可申请'
           : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
@@ -606,16 +622,16 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     }
     const dayView = view === 'day';
     const visibleDays = dayView ? [currentDay] : days;
-    const starts = visibleDays.map(day => dayStart(day.date));
     const column = (day: Day) => !dayView && days.indexOf(day) >= 5 ? ' class="booking-weekend"' : '';
-    const rows = Array.from({ length: 24 }, (_, row) => {
-      const hour = row % 2 === 0;
-      const clock = time(starts[0] + row * step);
-      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${visibleDays.map((day, index) => `<td${column(day)}>${slotMarkup(day, starts[index] + row * step, row)}</td>`).join('')}</tr>`;
+    const rows = Array.from({ length: rowCount }, (_, row) => {
+      const localMinute = start + row * stepMinutes;
+      const hour = localMinute % 60 === 0;
+      const clock = clockOf(localMinute);
+      return `<tr${hour ? ' class="booking-hour"' : ''}><th scope="row"${hour ? '' : ' class="booking-half-hour"'}>${clock}</th>${visibleDays.map(day => `<td${column(day)}>${slotMarkup(day, row)}</td>`).join('')}</tr>`;
     }).join('');
     calendar.innerHTML = `
       ${dayView ? `<div class="booking-days" role="group" aria-label="本周日期">${days.map((day, index) => `<button type="button" data-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}" aria-pressed="${day === currentDay}"${current(day)}>${dayLabel(day, index)}</button>`).join('')}</div>` : ''}
-      <table class="booking-time-grid ${dayView ? 'booking-day-grid' : 'booking-week-grid'}" aria-label="${dayView ? '当日' : '本周'}时间网格（UTC+8）">
+      <table class="booking-time-grid ${dayView ? 'booking-day-grid' : 'booking-week-grid'}" aria-label="${dayView ? '当日' : '本周'}时间网格（${zoneLabel()}）">
         <thead>
           ${dayView ? '' : `<tr><th scope="col">时间</th>${days.map((day, index) => `<th scope="col"${column(day)}>
             <button type="button" data-open-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}，查看当天"${current(day)}>${dayLabel(day, index)}</button>
@@ -636,7 +652,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   function setWeek(data: Week, edge?: 'first' | 'last') {
-    const sameWeek = week?.weekStart === data.weekStart;
+    const sameWeek = week?.weekStart === data.weekStart && week.grid.timeZone === data.grid.timeZone;
     const active = document.activeElement;
     const focused = sameWeek && calendar?.contains(active) ? active : undefined;
     const focusKey = focused?.getAttributeNames().find(name => name.startsWith('data-'));
@@ -651,7 +667,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       if (!directOffered && allowRequest) mode = 'request';
     }
     readAt = performance.now();
-    lastTick = Math.floor(now() / step);
+    lastTick = Math.floor((now() + data.grid.leadMinutes * minute) / stepMs());
     scheduleExpiry();
     syncSelection();
     if (focused && focusKey) {
@@ -660,20 +676,34 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     }
   }
 
-  async function loadWeek(offset: number, edge?: 'first' | 'last') {
+  async function loadWeek(offset: number, edge?: 'first' | 'last', background = false) {
     if (!alive || submitting || openSubmitting) return;
     weekRequest?.abort();
     const request = new AbortController();
     weekRequest = request;
-    weekVerified = false;
-    feedback.textContent = week ? '正在核对本周信息…' : '正在读取周历…';
-    if (week) {
-      const generic = requestWeek(Math.floor(now()), offset, allowRequest);
-      setWeek({ ...generic, canSubmit: false }, edge);
-    } else updateControls();
+    if (!background) {
+      weekVerified = false;
+      if (week && offset !== week.week) {
+        const grid = week.grid;
+        const nowAt = Math.floor(now());
+        const weekStart = shiftDate(week.weekStart, (offset - week.week) * 7);
+        const days = Array.from({ length: 7 }, (_, index) => {
+          const date = shiftDate(weekStart, index);
+          const slots: Slot[] = [];
+          for (let localMinute = grid.start; localMinute < grid.end; localMinute += grid.stepMinutes) {
+            const startAt = ruleTimestamp(date, localMinute, grid.timeZone);
+            if (Number.isFinite(startAt)) slots.push({ startAt, localMinute, state: 'unavailable' });
+          }
+          return { date, slots };
+        });
+        setWeek({ ...week, week: offset, weekStart, now: nowAt, days, canSubmit: false, canBook: false }, edge);
+      }
+      feedback.textContent = week ? '正在核对本周信息…' : '正在读取周历…';
+      updateControls();
+    }
     try {
       const response = await send(`/invite/calendar?week=${offset}`, undefined, request.signal);
-      if (!alive || weekRequest !== request) return;
+      if (!alive || weekRequest !== request || (background && (submitting || openSubmitting))) return;
       const data = readWeek(response);
       weekVerified = true;
       feedback.textContent = '';
@@ -681,7 +711,9 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     } catch (error) {
       if (!alive || weekRequest !== request) return;
       if (error instanceof InvitationError && [401, 403, 404].includes(error.status)) { unavailable(); return; }
-      feedback.textContent = week ? '暂时无法核对本周信息，已显示基础时段。' : '暂时无法读取周历。';
+      if (background && weekVerified) return;
+      syncSelection();
+      feedback.textContent = week ? '暂时无法核对本周信息，当前显示上次读取的时段。' : '暂时无法读取周历。';
       const retry = document.createElement('button');
       retry.type = 'button'; retry.className = 'text-button'; retry.textContent = '重试';
       retry.addEventListener('click', () => void loadWeek(offset, edge));
@@ -695,7 +727,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   }
 
   function choose(startAt: number) {
-    const date = bookingDate(startAt);
+    const date = dateAt(startAt);
     if (!availableSlots(week?.days.find(day => day.date === date)).some(slot => slot.startAt === startAt)) return;
     selectedDate = date; visibleDay = date; selectedStart = startAt;
     showRequestMessage('');
@@ -725,7 +757,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   todayButton?.addEventListener('click', () => {
     if (!week || submitting) return;
     if (week.week !== 0) void loadWeek(0);
-    else if (view === 'day') showDay(bookingDate(now()));
+    else if (view === 'day') showDay(dateAt(now()));
   });
   for (const button of viewButtons) button.addEventListener('click', () => {
     view = button.dataset.calendarView === 'day' ? 'day' : 'week';
@@ -798,9 +830,9 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         : '邀请人确认后会通过邮件回复。';
       const confirmedTime = direct && 'startAt' in response && 'endAt' in response
         && typeof response.startAt === 'number' && typeof response.endAt === 'number'
-        && Number.isFinite(new Date(response.startAt + chinaOffset).getTime())
-        && Number.isFinite(new Date(response.endAt + chinaOffset).getTime())
-        ? `<p>${shortDate(bookingDate(response.startAt))} ${time(response.startAt)}–${time(response.endAt)}（UTC+8）</p>` : '';
+        && Number.isFinite(new Date(response.startAt).getTime())
+        && Number.isFinite(new Date(response.endAt).getTime())
+        ? `<p>${shortDate(dateAt(response.startAt))} ${time(response.startAt)}–${time(response.endAt)}（${zoneLabel()}）</p>` : '';
       root.querySelector<HTMLElement>('[data-request-content]')!.innerHTML = `<div class="booking-receipt" role="status"><strong>${title}</strong>${confirmedTime}<p>${detail}</p></div>`;
       drawCalendar();
     } catch (error) {
@@ -817,7 +849,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
           week.canSubmit = false;
           showRequestMessage('在线申请暂未开启。可复制申请文字发给邀请人。', true);
         }
-      } else if (error instanceof InvitationError && ['SLOT_UNAVAILABLE', 'SLOT_CONFLICT'].includes(error.code)) {
+      } else if (error instanceof InvitationError && ['SLOT_UNAVAILABLE', 'SLOT_CONFLICT', 'BOOKING_LIMIT_REACHED'].includes(error.code)) {
         selectedStart = 0;
         refreshWeek = week.week;
         showRequestMessage(direct ? '这个时段已无法预约，请选择其他时间。' : '这个时段已经不能申请了，请选择其他时间。', true);
@@ -864,7 +896,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const draft = readDraft();
     const text = [
       '你好，我想申请见面时间。',
-      `${selectedDate} ${time(selectedStart)}–${time(selectedStart + selectedDuration * minute)}（UTC+8）`,
+      `${selectedDate} ${time(selectedStart)}–${time(selectedStart + selectedDuration * minute)}（${zoneLabel()}）`,
       `见面方式：${draft.meetingType === 'in-person' ? '线下' : '线上'}`,
       `姓名：${draft.name}`, `邮箱：${draft.email}`, ...(draft.notes ? [`备注：${draft.notes}`] : []),
     ].join('\n');
@@ -881,7 +913,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   function refreshClock() {
     if (!alive || !week || submitting || openSubmitting || document.hidden) return;
-    if (week.days.at(-1)!.date < bookingDate(now())) { void loadWeek(0); return; }
+    if (week.days.at(-1)!.date < dateAt(now())) { void loadWeek(0); return; }
     if (!weekRequest && weekVerified && week.availability === 'ready' && week.validUntil !== undefined && now() >= week.validUntil) {
       void loadWeek(week.week);
       return;
@@ -891,8 +923,9 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       syncSelection();
       scheduleExpiry();
     }
-    const tick = Math.floor(now() / step);
+    const tick = Math.floor((now() + week.grid.leadMinutes * minute) / stepMs());
     if (tick !== lastTick) { lastTick = tick; syncSelection(); }
+    if (!weekRequest && weekVerified && performance.now() - readAt >= 60_000) void loadWeek(week.week, undefined, true);
   }
   const redrawWeek = () => { if (view === 'week') drawCalendar(); };
   if (hasCalendar) compactWeek.addEventListener('change', redrawWeek);

@@ -171,8 +171,8 @@ button.booking-slot:focus-visible .booking-slot-time { opacity: 1; }
   .booking-overview-date { display: flex; gap: 4px; align-items: baseline; line-height: 1.35; }
   .booking-overview-date strong { font-weight: 650; color: #0b1220; }
   .booking-overview-detail { display: grid; min-width: 0; gap: 3px; }
-  .booking-overview-track { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 1px; }
-  .booking-overview-track i { height: 6px; background: #f0f1f3; }
+  .booking-overview-track { grid-column: 1 / -1; display: flex; gap: 1px; }
+  .booking-overview-track i { flex: 1; min-width: 0; height: 6px; background: #f0f1f3; }
   .booking-overview-track .busy { background: #b49acc; }
   .booking-overview-track .selected { background: #4b75cd; }
   .booking-overview-track .booking-open-track { background: var(--blue); }

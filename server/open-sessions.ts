@@ -32,7 +32,7 @@ export const openCalendarConflict = `EXISTS (SELECT 1 FROM calendar_sources cs, 
     AND json_extract(busy.value,'$[0]')<s.end_at AND json_extract(busy.value,'$[1]')>s.start_at)`;
 export const openOtherBooking = `EXISTS (SELECT 1 FROM booking_requests b
   WHERE b.status='confirmed' AND (b.open_session_id IS NULL OR b.open_session_id<>s.id)
-    AND b.start_at<s.end_at AND b.end_at>s.start_at)`;
+    AND b.start_at-b.buffer_before_ms<s.end_at AND b.end_at+b.buffer_after_ms>s.start_at)`;
 export const openConflicts = `(${openCalendarConflict} OR ${openOtherBooking})`;
 export const openClock = (now: number) => [now - CALENDAR_FRESH_MS, now] as const;
 
@@ -102,7 +102,7 @@ function sessionView(row: OpenSessionRow) {
 
 export async function weekOpenSessions(db: SqlDatabase, startAt: number, endAt: number, now: number, inviteId: string) {
   const result = await db.prepare(`SELECT s.*, ${confirmedCount} AS confirmed
-    FROM open_sessions s WHERE s.archived=0 AND s.start_at>? AND s.start_at>=? AND s.start_at<?
+    FROM open_sessions s WHERE s.archived=0 AND s.start_at>? AND s.end_at>? AND s.start_at<?
     AND ${openVisibility} AND NOT ${openConflicts} ORDER BY s.start_at`)
     .bind(now, startAt, endAt, inviteId, ...openClock(now)).all<OpenSessionRow>();
   return result.results.map(sessionView);

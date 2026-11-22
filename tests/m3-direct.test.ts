@@ -215,3 +215,40 @@ test('M3 提交时重新校验同步和邀请状态，失效后仍可人工申�
   assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM booking_requests WHERE source='direct'").first<{ n: number }>())?.n, 0);
   assert.equal(f.sent.length, 1);
 });
+
+test('M5 直约要求最新规则的覆盖范围，同时校验缓冲和每日额度', async t => {
+  const f = await fixture(t);
+  const invite = await f.invite();
+  await f.source('icloud', [[startAt + 2 * halfHour, startAt + 3 * halfHour]]);
+  await f.source('outlook');
+  const changed = await f.call('/api/admin/booking-rules', {
+    admin: true, method: 'PATCH', body: { bufferBefore: 15, bufferAfter: 15, horizonDays: 40, dailyLimit: 1 },
+  });
+  assert.equal(changed.status, 200);
+  assert.equal((await f.call<Calendar>(calendar, invite)).data.canBook, false);
+  assert.equal((await f.call(direct, { ...invite, body: booking({ duration: 30 }) })).data.error, 'REQUESTS_DISABLED');
+  await f.db.prepare('UPDATE calendar_sources SET covered_from=?,covered_until=?').bind(now - halfHour, now + 41 * 86_400_000).run();
+  const ready = (await f.call<Calendar>(calendar, invite)).data;
+  assert.equal(ready.canBook, true);
+  assert.deepEqual(ready.days[0].slots[0].bookableDurations, [30]);
+  assert.equal((await f.call(direct, { ...invite, body: booking() })).data.error, 'SLOT_CONFLICT');
+  assert.equal((await f.call(direct, { ...invite, body: booking({ duration: 30 }) })).status, 201);
+  assert.equal((await f.call(direct, { ...invite, body: booking({ startAt: startAt + 4 * halfHour, duration: 30 }) })).data.error, 'BOOKING_LIMIT_REACHED');
+  assert.equal((await f.call(direct, { ...invite, body: booking({ startAt: startAt + 86_400_000, duration: 30 }) })).status, 201);
+});
+
+test('M5 已确认的缓冲对其他邀请和后续规则变更仍有效', async t => {
+  const f = await fixture(t);
+  await f.source('icloud');
+  await f.source('outlook');
+  const padded = await f.invite(), regular = await f.invite();
+  const rulesPath = '/api/admin/booking-rules';
+  assert.equal((await f.call(rulesPath, { admin: true, method: 'PATCH', body: { bufferAfter: 15 } })).status, 200);
+  await f.db.prepare('UPDATE calendar_sources SET covered_until=?').bind(now + 31 * 86_400_000).run();
+  assert.equal((await f.call(direct, { ...padded, body: booking({ duration: 30 }) })).status, 201);
+  assert.equal((await f.call(rulesPath, { admin: true, method: 'PATCH', body: { bufferAfter: 0 } })).status, 200);
+  const adjacent = { ...regular, body: booking({ startAt: startAt + halfHour, duration: 30 }) };
+  assert.equal((await f.call(direct, adjacent)).data.error, 'SLOT_CONFLICT');
+  const ready = (await f.call<Calendar>(calendar, regular)).data;
+  assert.equal(ready.days[0].slots[1].availability, 'blocked');
+});

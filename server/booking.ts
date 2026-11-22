@@ -1,7 +1,10 @@
 import type { Context, Hono } from 'hono';
-import { BOOKING_DAY, isRequestSlot, parseEmailAddress, REQUEST_DURATIONS, REQUEST_HORIZON, requestWeek } from '../shared/booking.js';
+import { BOOKING_DAY, isRequestSlot, parseEmailAddress, requestWeek, weekBounds } from '../shared/booking.js';
+import { expired, lengthsAtWallTime, ruleDate } from '../shared/booking-rules.js';
+import type { BookingRules } from '../shared/booking-rules.js';
+import { coverageFor, quotaGuard, readRules, revisionGate } from './booking-rules.js';
 import { AuthError, requireAdmin } from './auth.js';
-import { CALENDAR_FRESH_MS, CALENDAR_WINDOW_MS, readAvailability } from './calendar-availability.js';
+import { CALENDAR_FRESH_MS, mergeBusyRanges, readAvailability } from './calendar-availability.js';
 import type { BusySnapshot } from './calendar-availability.js';
 import { withCalendarCities } from './calendar-location.js';
 import type { Environment } from './db.js';
@@ -31,6 +34,8 @@ export interface BookingRow {
   notes: string;
   status: BookingStatus;
   source: BookingSource;
+  buffer_before_ms: number;
+  buffer_after_ms: number;
   open_session_id: string | null;
   open_title?: string | null;
   created_at: number;
@@ -47,16 +52,20 @@ const directCalendarGate = `EXISTS (SELECT 1 FROM calendar_settings WHERE id=1 A
   AND (SELECT COUNT(*) FROM calendar_sources WHERE provider IN ('icloud','outlook')
     AND synced_at>? AND synced_at<=? AND covered_from<=? AND covered_until>=?
     AND last_error IS NULL AND json_type(busy_json)='array')=2`;
+const confirmedOverlap = `((other.start_at<? AND other.end_at>?)
+  OR (other.start_at-other.buffer_before_ms<? AND other.end_at+other.buffer_after_ms>?))`;
 const noConfirmedOverlap = `NOT EXISTS (SELECT 1 FROM booking_requests other
-  WHERE other.status='confirmed' AND other.start_at<? AND other.end_at>?)`;
+  WHERE other.status='confirmed' AND ${confirmedOverlap})`;
 const noBusyOverlap = `NOT EXISTS (SELECT 1 FROM calendar_sources source, json_each(source.busy_json) busy
   WHERE source.provider IN ('icloud','outlook')
     AND json_extract(busy.value,'$[0]')<? AND json_extract(busy.value,'$[1]')>?)`;
 const noOpenOverlap = 'NOT EXISTS (SELECT 1 FROM open_sessions WHERE archived=0 AND start_at<? AND end_at>?)';
 type Reservation = { start_at: number; end_at: number };
+type ConfirmedReservation = Reservation & Pick<BookingRow, 'open_session_id' | 'buffer_before_ms' | 'buffer_after_ms'>;
 
-function calendarWindow(now: number) {
-  return [now - CALENDAR_FRESH_MS, now, now, now + CALENDAR_WINDOW_MS];
+function calendarWindow(now: number, rules: BookingRules) {
+  const { before, after } = coverageFor(rules);
+  return [now - CALENDAR_FRESH_MS, now, now - before, now + after];
 }
 
 function database(c: Ctx) {
@@ -81,8 +90,8 @@ function readText(value: unknown, limit: number, multiline = false): string {
   return value.replace(/\r\n?/g, '\n').trim();
 }
 
-function readSlot(startAt: unknown, duration: unknown, now: number) {
-  if (typeof startAt !== 'number' || typeof duration !== 'number' || !isRequestSlot(startAt, duration, now)) {
+function readSlot(startAt: unknown, duration: unknown, now: number, rules: BookingRules, checkLead = true) {
+  if (typeof startAt !== 'number' || typeof duration !== 'number' || !isRequestSlot(startAt, duration, now, rules, checkLead)) {
     throw new AuthError(409, 'SLOT_UNAVAILABLE');
   }
   return { startAt, endAt: startAt + duration * MINUTE };
@@ -162,6 +171,9 @@ export async function decideBooking(c: Ctx, row: BookingRow, input: Record<strin
   if (row.updated_at !== expected) throw new AuthError(409, 'BOOKING_CHANGED');
   const now = Date.now();
   const open = row.open_session_id !== null;
+  const db = database(c);
+  const changesTime = input.action === 'suggest' || input.action === 'reschedule';
+  const policy = !open && (changesTime || input.action === 'confirm') ? await readRules(db, row.invite_id) : null;
   if (open && (input.action === 'suggest' || input.action === 'reschedule')) throw new AuthError(409, 'SLOT_UNAVAILABLE');
   const canDecide = row.status === 'pending' || row.status === 'suggested';
   const canEdit = row.status === 'confirmed';
@@ -180,7 +192,7 @@ export async function decideBooking(c: Ctx, row: BookingRow, input: Record<strin
     case 'suggest':
       if (!canDecide) throw new AuthError(409, 'BOOKING_CHANGED');
       status = 'suggested';
-      ({ startAt, endAt } = readSlot(input.startAt, input.duration, now));
+      ({ startAt, endAt } = readSlot(input.startAt, input.duration, now, policy!.rules));
       break;
     case 'cancel':
       if (!canEdit) throw new AuthError(409, 'BOOKING_CHANGED');
@@ -189,33 +201,47 @@ export async function decideBooking(c: Ctx, row: BookingRow, input: Record<strin
     case 'reschedule':
       if (!canEdit) throw new AuthError(409, 'BOOKING_CHANGED');
       status = 'confirmed';
-      ({ startAt, endAt } = readSlot(input.startAt, input.duration, now));
+      ({ startAt, endAt } = readSlot(input.startAt, input.duration, now, policy!.rules));
       break;
     default:
       throw new AuthError(400, 'INVALID_INPUT');
   }
   if (row.start_at <= now) throw new AuthError(409, 'SLOT_UNAVAILABLE');
-  if (status === 'confirmed' && !open) readSlot(startAt, (endAt - startAt) / MINUTE, now);
+  if (status === 'confirmed' && policy) readSlot(startAt, (endAt - startAt) / MINUTE, now, policy.rules, input.action !== 'confirm');
   const message = readText(input.message ?? '', 1000, true);
   const updatedAt = Math.max(now, expected + 1);
+  const bufferBefore = policy ? policy.rules.bufferBefore * MINUTE : row.buffer_before_ms;
+  const bufferAfter = policy ? policy.rules.bufferAfter * MINUTE : row.buffer_after_ms;
+  const from = startAt - bufferBefore;
+  const through = endAt + bufferAfter;
+  const quota = policy ? quotaGuard(policy.rules, startAt, row.id) : { sql: '1', bindings: [] };
+  const policySql = policy ? `${revisionGate} AND EXISTS (SELECT 1 FROM invites WHERE id=? AND booking_rules_json IS ?)` : '1';
+  const policyBindings = policy ? [policy.revision, row.invite_id, policy.override] : [];
   const canConfirm = open
     ? `EXISTS (SELECT 1 FROM open_sessions s WHERE s.id=? AND s.archived=0 AND s.start_at>?
       AND ${openHasCapacity} AND NOT ${openConflicts})`
     : `${noOpenOverlap} AND NOT EXISTS (SELECT 1 FROM booking_requests other
-      WHERE other.status='confirmed' AND other.id<>? AND other.start_at<? AND other.end_at>?)`;
-  const confirmBindings = open ? [row.open_session_id, now, ...openClock(now)] : [endAt, startAt, row.id, endAt, startAt];
-  const changed = await database(c).prepare(`
+      WHERE other.status='confirmed' AND other.id<>? AND ${confirmedOverlap}) AND (${quota.sql})`;
+  const confirmBindings = open ? [row.open_session_id, now, ...openClock(now)] : [through, from, row.id, through, from, endAt, startAt, ...quota.bindings];
+  const changed = await db.prepare(`
     UPDATE booking_requests
-    SET status=?,start_at=?,end_at=?,message=?,updated_at=?,sequence=sequence+1,mail_status='pending'
+    SET status=?,start_at=?,end_at=?,buffer_before_ms=?,buffer_after_ms=?,message=?,updated_at=?,sequence=sequence+1,mail_status='pending'
     WHERE id=? AND updated_at=? AND status=? AND start_at>?
-      AND (?<>'confirmed' OR (${canConfirm}))
+      AND (${policySql}) AND (?<>'confirmed' OR (${canConfirm}))
     RETURNING *
-  `).bind(status, startAt, endAt, message, updatedAt, row.id, expected, row.status, now,
-    status, ...confirmBindings).first<BookingRow>();
+  `).bind(status, startAt, endAt, bufferBefore, bufferAfter, message, updatedAt, row.id, expected, row.status, now,
+    ...policyBindings, status, ...confirmBindings).first<BookingRow>();
   if (changed) return changed;
 
   const latest = await findBooking(c, row.id);
   if (!latest || latest.updated_at !== expected || latest.status !== row.status) throw new AuthError(409, 'BOOKING_CHANGED');
+  if (policy) {
+    const latestRules = await readRules(db, row.invite_id);
+    if (latestRules.revision !== policy.revision || latestRules.override !== policy.override) throw new AuthError(409, 'SLOT_UNAVAILABLE');
+    if (status === 'confirmed' && !await db.prepare(`SELECT 1 WHERE ${quota.sql}`).bind(...quota.bindings).first()) {
+      throw new AuthError(409, 'BOOKING_LIMIT_REACHED');
+    }
+  }
   if (open && status === 'confirmed') {
     const session = await database(c).prepare(`SELECT s.archived,s.start_at,NOT ${openHasCapacity} AS full
       FROM open_sessions s WHERE s.id=?`).bind(row.open_session_id).first<{ archived: number; start_at: number; full: number }>();
@@ -241,31 +267,53 @@ async function tryDelivery(c: Ctx, row: BookingRow): Promise<BookingMailStatus> 
   catch { return row.mail_status; }
 }
 
-async function canBookDirect(c: Ctx, now: number) {
+async function canBookDirect(c: Ctx, now: number, rules: BookingRules) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(c.env.DATA_ENCRYPTION_KEY ?? '')) return false;
   return Boolean(await database(c).prepare(`SELECT 1 WHERE ${DIRECT_MAIL_GATE_SQL} AND ${directCalendarGate}`)
-    .bind(...calendarWindow(now)).first());
+    .bind(...calendarWindow(now, rules)).first());
 }
 
-async function showAvailability(c: Ctx, days: ReturnType<typeof requestWeek>['days'], now: number,
-  snapshot: BusySnapshot, hideBusy: boolean, showDurations: boolean, reserved: Reservation[]) {
-  const start = days[0].slots[0].startAt;
-  const end = days.at(-1)!.slots.at(-1)!.startAt + 30 * MINUTE;
-  const booked = await database(c).prepare(`SELECT start_at,end_at FROM booking_requests
-    WHERE status='confirmed' AND start_at<? AND end_at>?`).bind(end, start).all<{ start_at: number; end_at: number }>();
-  const intervals = snapshot.busy.filter(([from, through]) => from < end && through > start);
-  for (const row of [...booked.results, ...reserved]) intervals.push([row.start_at, row.end_at]);
-  intervals.sort(([a], [b]) => a - b);
-  let interval = 0;
+function markAvailability<T extends ReturnType<typeof requestWeek>['days'][number]>(days: T[], now: number,
+  rules: BookingRules, snapshot: BusySnapshot | null, hideBusy: boolean, showDurations: boolean, reserved: Reservation[],
+  booked: ConfirmedReservation[], from: number, through: number) {
+  const countByDate = new Map<string, number>();
+  let weekCount = 0;
+  if (rules.dailyLimit || rules.weeklyLimit) for (const row of booked) {
+    if (row.open_session_id !== null || row.start_at < from || row.start_at >= through) continue;
+    const date = ruleDate(row.start_at, rules.timeZone);
+    countByDate.set(date, (countByDate.get(date) ?? 0) + 1);
+    weekCount++;
+  }
+  const intervals = mergeBusyRanges([...(snapshot?.busy ?? []), ...[...booked, ...reserved].map(row =>
+    [row.start_at, row.end_at] as [number, number])]);
+  // Require the new meeting to clear existing buffers and its own buffers to clear existing meetings.
+  const protectedRanges = mergeBusyRanges(booked.map(row =>
+    [row.start_at - row.buffer_before_ms, row.end_at + row.buffer_after_ms]));
+  const before = rules.bufferBefore * MINUTE;
+  const after = rules.bufferAfter * MINUTE;
+  let protectedIndex = 0;
+  let bufferedIndex = 0;
+  let busyIndex = 0;
   return days.map(day => ({ ...day, slots: day.slots.map(slot => {
-    const startAt = slot.startAt;
-    if (startAt <= now || startAt > now + REQUEST_HORIZON) return slot;
-    while (interval < intervals.length && intervals[interval][1] <= startAt) interval++;
-    const nextBusy = intervals[interval]?.[0] ?? Infinity;
-    const free = REQUEST_DURATIONS.filter(duration => isRequestSlot(startAt, duration, now)
-      && startAt + duration * MINUTE <= nextBusy);
-    const availability = free.length ? 'available' : !hideBusy && nextBusy < startAt + 30 * MINUTE ? 'busy' : 'blocked';
-    return { ...slot, availability, ...(showDurations && free.length ? { bookableDurations: free } : {}) };
+    const at = slot.startAt;
+    if (expired(at, now, rules.leadMinutes) || at > now + rules.horizonDays * BOOKING_DAY) return slot;
+    const quotaFull = (rules.weeklyLimit > 0 && weekCount >= rules.weeklyLimit)
+      || (rules.dailyLimit > 0 && (countByDate.get(day.date) ?? 0) >= rules.dailyLimit);
+    const requestDurations = quotaFull ? [] : slot.requestDurations?.filter(length =>
+      !reserved.some(row => row.start_at < at + length * MINUTE + after && row.end_at > at - before));
+    const output = slot.state === 'request' ? {
+      ...slot, state: requestDurations?.length ? 'request' : 'unavailable', requestDurations,
+    } : slot;
+    if (!snapshot) return output;
+    while (bufferedIndex < intervals.length && intervals[bufferedIndex][1] <= at - before) bufferedIndex++;
+    while (busyIndex < intervals.length && intervals[busyIndex][1] <= at) busyIndex++;
+    while (protectedIndex < protectedRanges.length && protectedRanges[protectedIndex][1] <= at) protectedIndex++;
+    const next = Math.min((intervals[bufferedIndex]?.[0] ?? Infinity) - after, protectedRanges[protectedIndex]?.[0] ?? Infinity);
+    const busy = (intervals[busyIndex]?.[0] ?? Infinity) < at + rules.stepMinutes * MINUTE;
+    const free = quotaFull ? [] : (slot.requestDurations ?? lengthsAtWallTime(at, day.date, slot.localMinute, now, rules))
+      .filter(length => at + length * MINUTE <= next);
+    return { ...output, availability: free.length ? 'available' : !hideBusy && busy ? 'busy' : 'blocked',
+      ...(showDurations && free.length ? { bookableDurations: free } : {}) };
   }) }));
 }
 
@@ -296,34 +344,47 @@ async function submitBooking(c: Ctx, source: BookingSource) {
   }
   const existing = await findSubmission(c, invitation.id, submissionId);
   if (existing) return accepted(existing);
-  const ready = (now: number) => direct ? canBookDirect(c, now) : requestMailReady(c);
+  const db = database(c);
+  const policy = await readRules(db, invitation.id);
+  const rules = policy.rules;
+  const ready = (now: number) => direct ? canBookDirect(c, now, rules) : requestMailReady(c);
   const checkedAt = Date.now();
-  readSlot(input.startAt, input.duration, checkedAt);
+  readSlot(input.startAt, input.duration, checkedAt, rules);
   if (!await ready(checkedAt)) throw new AuthError(403, 'REQUESTS_DISABLED');
   await limitRequest(c, invitation.id, Date.now());
   const now = Date.now();
-  const { startAt, endAt } = readSlot(input.startAt, input.duration, now);
+  const { startAt, endAt } = readSlot(input.startAt, input.duration, now, rules);
+  const bufferBefore = rules.bufferBefore * MINUTE;
+  const bufferAfter = rules.bufferAfter * MINUTE;
+  const from = startAt - bufferBefore;
+  const through = endAt + bufferAfter;
+  const quota = quotaGuard(rules, startAt);
   // D1 serializes writes. The conflict and freshness checks must be part of the INSERT.
   const gate = direct ? `direct_enabled=1 AND ${DIRECT_MAIL_GATE_SQL} AND ${directCalendarGate}
       AND ${noConfirmedOverlap} AND ${noBusyOverlap}` : REQUEST_MAIL_GATE_SQL;
-  const directBindings = direct ? [...calendarWindow(now), endAt, startAt, endAt, startAt] : [];
-  const row = await database(c).prepare(`
-    INSERT INTO booking_requests(id,invite_id,submission_id,submission_fingerprint,name,email,start_at,end_at,meeting_type,notes,status,created_at,updated_at,source)
-    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?
+  const directBindings = direct ? [...calendarWindow(now, rules), through, from, endAt, startAt, through, from] : [];
+  const row = await db.prepare(`
+    INSERT INTO booking_requests(id,invite_id,submission_id,submission_fingerprint,name,email,start_at,end_at,meeting_type,notes,status,created_at,updated_at,source,buffer_before_ms,buffer_after_ms)
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
     FROM invites WHERE id=? AND kind='invite' AND revoked_at IS NULL AND expires_at>? AND permissions_json=?
-      AND ${noOpenOverlap} AND ${gate}
+      AND booking_rules_json IS ? AND ${revisionGate} AND ${noOpenOverlap} AND (${quota.sql}) AND ${gate}
     ON CONFLICT(invite_id,submission_id) DO NOTHING
     RETURNING *
   `).bind(crypto.randomUUID(), invitation.id, submissionId, fingerprint, name, email, startAt, endAt,
-    meetingType, notes, direct ? 'confirmed' : 'pending', now, now, source,
-    invitation.id, now, invitation.permissions_json, endAt, startAt, ...directBindings).first<BookingRow>();
+    meetingType, notes, direct ? 'confirmed' : 'pending', now, now, source, bufferBefore, bufferAfter,
+    invitation.id, now, invitation.permissions_json, policy.override, policy.revision, through, from, ...quota.bindings, ...directBindings).first<BookingRow>();
   if (!row) {
     const raced = await findSubmission(c, invitation.id, submissionId);
     if (raced) return accepted(raced);
     const current = await activeInvitation(c);
     if (current.id !== invitation.id || current.permissions_json !== invitation.permissions_json
       || (direct && current.direct_enabled !== 1)) throw new AuthError(404, 'NOT_FOUND');
-    if (await ready(Date.now())) throw new AuthError(409, 'SLOT_CONFLICT');
+    const latestRules = await readRules(db, current.id);
+    if (latestRules.revision !== policy.revision || latestRules.override !== policy.override) throw new AuthError(409, 'SLOT_UNAVAILABLE');
+    if (await ready(Date.now())) {
+      if (!await db.prepare(`SELECT 1 WHERE ${quota.sql}`).bind(...quota.bindings).first()) throw new AuthError(409, 'BOOKING_LIMIT_REACHED');
+      throw new AuthError(409, 'SLOT_CONFLICT');
+    }
     throw new AuthError(403, 'REQUESTS_DISABLED');
   }
   return c.json(receipt(row, await tryDelivery(c, row)), 201);
@@ -386,17 +447,6 @@ async function submitOpenSession(c: Ctx) {
   throw new AuthError(409, closed.full && !closed.archived && !closed.conflict && closed.start_at > now ? 'OPEN_FULL' : 'SLOT_UNAVAILABLE');
 }
 
-function withoutOpenReservations(days: ReturnType<typeof requestWeek>['days'], reserved: Reservation[], now: number) {
-  if (!reserved.length) return days;
-  return days.map(day => ({ ...day, slots: day.slots.map(slot => {
-    if (slot.state !== 'request') return slot;
-    const lengths = REQUEST_DURATIONS.filter(length => isRequestSlot(slot.startAt, length, now));
-    const free = lengths.filter(length => !reserved.some(row => row.start_at < slot.startAt + length * MINUTE && row.end_at > slot.startAt));
-    if (free.length === lengths.length) return slot;
-    return { ...slot, state: free.length ? 'request' as const : 'unavailable' as const, requestDurations: free };
-  }) }));
-}
-
 export function mountBookings(app: Hono<{ Bindings: Environment }>) {
   app.get('/api/invite/calendar', async c => {
     const now = Date.now();
@@ -409,28 +459,34 @@ export function mountBookings(app: Hono<{ Bindings: Environment }>) {
     if (!canRequest && !canSeeCalendar && !canOpen) throw new AuthError(404, 'NOT_FOUND');
     const requestedWeek = c.req.query('week') ?? '0';
     if (!/^\d{1,2}$/.test(requestedWeek)) throw new AuthError(400, 'INVALID_INPUT');
-    const week = requestWeek(now, Number(requestedWeek), canRequest);
     const db = database(c);
-    const first = week.days[0].slots[0].startAt;
-    const last = first + 7 * BOOKING_DAY;
-    const [canSubmit, cities, calendar, directReady, openSessions, reserved] = await Promise.all([
+    const { rules } = await readRules(db, invitation.id);
+    const offset = Number(requestedWeek);
+    const { from, through } = weekBounds(now, offset, rules, canOpen);
+    const lower = from - rules.bufferBefore * MINUTE;
+    const upper = through + rules.bufferAfter * MINUTE;
+    const [canSubmit, calendar, directReady, openSessions, reserved, booked] = await Promise.all([
       invitation.kind === 'invite' && canRequest && requestMailReady(c),
-      canSeeCalendar && permissions.modules.includes('travel') ? withCalendarCities(c, week.days, now) : week.days,
-      canSeeCalendar ? readAvailability(db, now) : undefined,
+      canSeeCalendar ? readAvailability(db, now, coverageFor(rules)) : undefined,
       allowDirect && invitation.kind === 'invite' && directMailReady(c),
-      canOpen ? weekOpenSessions(db, first, last, now, invitation.preview_invite_id ?? invitation.id) : undefined,
+      canOpen ? weekOpenSessions(db, from, through, now, invitation.preview_invite_id ?? invitation.id) : undefined,
       canRequest || canSeeCalendar ? db.prepare(`SELECT start_at,end_at FROM open_sessions
-        WHERE archived=0 AND start_at<? AND end_at>? ORDER BY start_at`).bind(last, first).all<Reservation>() : undefined,
+        WHERE archived=0 AND start_at<? AND end_at>?`).bind(upper, lower).all<Reservation>() : undefined,
+      canSeeCalendar || rules.dailyLimit || rules.weeklyLimit ? db.prepare(`SELECT start_at,end_at,open_session_id,buffer_before_ms,buffer_after_ms
+        FROM booking_requests WHERE status='confirmed'
+          AND ((start_at<? AND end_at>?) OR (start_at-buffer_before_ms<? AND end_at+buffer_after_ms>?))`)
+        .bind(upper, lower, through, from).all<ConfirmedReservation>() : undefined,
     ]);
-    const days = withoutOpenReservations(cities, reserved?.results ?? [], now);
+    const week = requestWeek(now, offset, canRequest, rules, canOpen, openSessions);
+    const cities = canSeeCalendar && permissions.modules.includes('travel')
+      ? await withCalendarCities(c, week.days, now, rules.timeZone, Math.max(30, rules.horizonDays)) : week.days;
+    const canBook = Boolean(calendar?.snapshot && calendar.directEnabled && directReady);
+    const days = markAvailability(cities, now, rules, calendar?.snapshot ?? null, permissions.hideBusy === true,
+      canBook || (allowDirect && invitation.kind === 'preview'), reserved?.results ?? [], booked?.results ?? [], from, through);
     const output = { ...week, days, canSubmit, ...(openSessions ? { openSessions } : {}) };
     if (!calendar) return c.json(output);
     if (!calendar.snapshot) return c.json({ ...output, availability: 'unavailable', canBook: false });
-    const canBook = calendar.directEnabled && directReady;
-    const markedDays = await showAvailability(c, days, now, calendar.snapshot, permissions.hideBusy === true,
-      canBook || (allowDirect && invitation.kind === 'preview'), reserved?.results ?? []);
-    return c.json({ ...output, days: markedDays, availability: 'ready', canBook,
-      validUntil: calendar.snapshot.validUntil });
+    return c.json({ ...output, availability: 'ready', canBook, validUntil: calendar.snapshot.validUntil });
   });
 
   app.post('/api/invite/requests', c => submitBooking(c, 'request'));
@@ -455,6 +511,12 @@ export function mountBookings(app: Hono<{ Bindings: Environment }>) {
         .bind(status, now).all<BookingRow>();
     }
     return c.json({ requests: rows.results.map(row => bookingView(row, row.mail_status, now)) });
+  });
+
+  app.get('/api/admin/requests/:id/rules', async c => {
+    await requireBookingAdmin(c);
+    const row = await bookingOr404(c);
+    return c.json({ rules: (await readRules(database(c), row.invite_id)).rules });
   });
 
   app.post('/api/admin/requests/:id/decision', async c => {

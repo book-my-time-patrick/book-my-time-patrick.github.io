@@ -1,5 +1,8 @@
 import { escapeHtml as e } from './ui';
-import { BOOKING_DAY, BOOKING_TIMEZONE, REQUEST_DURATIONS, bookingDate, isRequestSlot } from '../../shared/booking';
+import { BOOKING_DAY, BOOKING_TIMEZONE, bookingDate, isRequestSlot } from '../../shared/booking';
+import { minuteOf, ruleTimestamp } from '../../shared/booking-rules';
+import type { BookingRules } from '../../shared/booking-rules';
+import { ruleTimeFields } from './admin-booking-rules';
 
 export type RequestFilter = 'pending' | 'confirmed' | 'history';
 type BookingStatus = 'pending' | 'confirmed' | 'declined' | 'suggested' | 'cancelled' | 'expired';
@@ -137,7 +140,15 @@ export function renderBookingInbox(
     item.querySelectorAll<HTMLButtonElement>('[data-decision]').forEach(button => {
       button.addEventListener('click', () => {
         const editor = item.querySelector<HTMLElement>('[data-decision-editor]')!;
-        showDecisionForm(editor, request, button.dataset.decision as Decision, actions);
+        const decision = button.dataset.decision as Decision;
+        if (decision !== 'suggest' && decision !== 'reschedule') {
+          showDecisionForm(editor, request, decision, actions);
+          return;
+        }
+        void actions.run(async () => {
+          const { rules } = await actions.request<{ rules: BookingRules }>(`/admin/requests/${encodeURIComponent(request.id)}/rules`);
+          if (actions.isCurrent()) showDecisionForm(editor, request, decision, actions, rules);
+        }, button);
       });
     });
     const notify = item.querySelector<HTMLButtonElement>('[data-notify]');
@@ -149,20 +160,12 @@ export function renderBookingInbox(
   }
 }
 
-function showDecisionForm(editor: HTMLElement, booking: BookingView, decision: Decision, actions: PanelActions) {
-  const changeTime = decision === 'reschedule' || decision === 'suggest';
-  const timeOptions = Array.from({ length: 24 }, (_, index) => `${String(9 + Math.floor(index / 2)).padStart(2, '0')}:${index % 2 ? '30' : '00'}`);
-  const currentTime = timeOnly.format(booking.startAt);
+function showDecisionForm(editor: HTMLElement, booking: BookingView, decision: Decision, actions: PanelActions, rules?: BookingRules) {
   const minutes = (booking.endAt - booking.startAt) / 60_000;
   editor.innerHTML = `
     <form class="admin-m2-editor" method="post" aria-label="${decisionLabels[decision]}">
       <h4>${decisionLabels[decision]}</h4>
-      ${changeTime ? `<p class="admin-help">北京时间（UTC+8） · 工作日 09:00–21:00</p>
-        <div class="admin-form-row">
-          <label class="admin-field">日期<input type="date" name="date" min="${bookingDate(Date.now())}" max="${bookingDate(Date.now() + 30 * BOOKING_DAY)}" value="${bookingDate(booking.startAt)}" required></label>
-          <label class="admin-field">开始时间<select name="time" required>${timeOptions.map(time => `<option value="${time}"${time === currentTime ? ' selected' : ''}>${time}</option>`).join('')}</select></label>
-        </div>
-        <label class="admin-field">时长<select name="duration">${REQUEST_DURATIONS.map(duration => `<option value="${duration}"${duration === minutes ? ' selected' : ''}>${duration} 分钟</option>`).join('')}</select></label>` : ''}
+      ${rules ? ruleTimeFields(rules, booking.startAt, minutes) : ''}
       <label class="admin-field">给对方的留言（可选）<textarea name="message" rows="2" maxlength="1000"></textarea></label>
       <div class="admin-actions">
         <button class="primary" type="submit">${decisionLabels[decision]}</button>
@@ -175,13 +178,13 @@ function showDecisionForm(editor: HTMLElement, booking: BookingView, decision: D
     const input: { action: Decision; expectedUpdatedAt: number; message: string; startAt?: number; duration?: number } = {
       action: decision, expectedUpdatedAt: booking.updatedAt, message: textValue(data, 'message'),
     };
-    if (changeTime) {
+    if (rules) {
       const localDate = textValue(data, 'date');
       const localTime = textValue(data, 'time');
-      const startAt = Date.parse(`${localDate}T${localTime}:00+08:00`);
+      const startAt = ruleTimestamp(localDate, minuteOf(localTime), rules.timeZone);
       const duration = Number(textValue(data, 'duration'));
-      if (!isRequestSlot(startAt, duration, Date.now())) {
-        actions.banner('请选择未来 30 天内的工作日，整段时间须在北京时间 09:00–21:00。', true);
+      if (!isRequestSlot(startAt, duration, Date.now(), rules)) {
+        actions.banner('请选择符合这条邀请的时段、提前量和时长。', true);
         return;
       }
       input.startAt = startAt;

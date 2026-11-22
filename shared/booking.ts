@@ -1,13 +1,10 @@
+import { DAY, MINUTE, DEFAULT_RULES, dayStart, expired, lengthsAtWallTime, lengthsFor, mondayOf, ruleDate, ruleClock, ruleTimestamp, minuteOf, shiftDate } from './booking-rules.js';
+import type { BookingRules } from './booking-rules.js';
 export const BOOKING_TIMEZONE = 'Asia/Shanghai';
 export const REQUEST_DURATIONS = [30, 60, 90, 120] as const;
 export const BOOKING_DAY = 86_400_000;
 export const REQUEST_HORIZON = 30 * BOOKING_DAY;
-const MINUTE = 60_000;
 const UTC_OFFSET = 8 * 60 * MINUTE;
-const SLOT_STEP = 30 * MINUTE;
-const OPEN_MINUTE = 9 * 60;
-const CLOSE_MINUTE = 21 * 60;
-const WEEK = 7 * BOOKING_DAY;
 
 export type SlotState = 'expired' | 'request' | 'unavailable';
 
@@ -15,34 +12,48 @@ export function bookingDate(timestamp: number): string {
   return new Date(timestamp + UTC_OFFSET).toISOString().slice(0, 10);
 }
 
-export function isRequestSlot(startAt: number, duration: number, now: number): boolean {
-  if (!Number.isSafeInteger(startAt) || !REQUEST_DURATIONS.some(value => value === duration)) return false;
-  if (startAt <= now || startAt > now + REQUEST_HORIZON || startAt % SLOT_STEP !== 0) return false;
-  const local = new Date(startAt + UTC_OFFSET);
-  const day = local.getUTCDay();
-  const minute = local.getUTCHours() * 60 + local.getUTCMinutes();
-  return day >= 1 && day <= 5 && minute >= OPEN_MINUTE && minute + duration <= CLOSE_MINUTE;
+export function isRequestSlot(at: number, duration: number, now: number, rules = DEFAULT_RULES, checkLead = true) {
+  return lengthsFor(at, now, rules, checkLead).includes(duration);
 }
 
-export function requestWeek(now: number, requestedWeek: number, allowRequests: boolean) {
-  const localDay = Math.floor((now + UTC_OFFSET) / BOOKING_DAY) * BOOKING_DAY - UTC_OFFSET;
-  const dayOfWeek = new Date(now + UTC_OFFSET).getUTCDay();
-  const firstMonday = localDay - ((dayOfWeek + 6) % 7) * BOOKING_DAY;
-  const maxWeek = Math.floor((now + REQUEST_HORIZON - firstMonday) / WEEK);
-  const week = Math.min(requestedWeek, maxWeek);
-  const start = firstMonday + week * WEEK;
+export function weekBounds(now: number, requested: number, rules: BookingRules, allowOpen: boolean) {
+  const zone = rules.timeZone;
+  const monday = mondayOf(ruleDate(now, zone));
+  const horizon = Math.max(rules.horizonDays, allowOpen ? 30 : 0) * DAY;
+  const maxWeek = (Date.parse(mondayOf(ruleDate(now + horizon, zone))) - Date.parse(monday)) / (7 * DAY);
+  const week = Math.max(0, Math.min(requested, maxWeek));
+  const weekStart = shiftDate(monday, week * 7);
+  return { week, maxWeek, weekStart, from: dayStart(weekStart, zone), through: dayStart(shiftDate(weekStart, 7), zone) };
+}
+
+export function requestWeek(now: number, requested: number, allowRequests: boolean, rules = DEFAULT_RULES,
+  allowOpen = false, sessions: { startAt: number; endAt: number }[] = []) {
+  const { week, maxWeek, weekStart } = weekBounds(now, requested, rules, allowOpen);
+  const { timeZone, stepMinutes, leadMinutes } = rules;
+  let start = 540;
+  let end = 1260;
+  for (const [from, through] of rules.weeklyHours.flat()) { start = Math.min(start, from); end = Math.max(end, through); }
+  for (const session of sessions) {
+    const last = session.endAt - MINUTE;
+    if (ruleDate(session.startAt, timeZone) !== ruleDate(last, timeZone)) { start = 0; end = 1440; continue; }
+    start = Math.min(start, minuteOf(ruleClock(session.startAt, timeZone)));
+    end = Math.max(end, minuteOf(ruleClock(last, timeZone)) + 1);
+  }
+  start = Math.floor(start / stepMinutes) * stepMinutes;
+  end = Math.ceil(end / stepMinutes) * stepMinutes;
   const days = Array.from({ length: 7 }, (_, index) => {
-    const midnight = start + index * BOOKING_DAY;
-    const slots = Array.from({ length: (CLOSE_MINUTE - OPEN_MINUTE) / 30 }, (_, slotIndex) => {
-      const startAt = midnight + OPEN_MINUTE * MINUTE + slotIndex * SLOT_STEP;
-      let state: SlotState = 'unavailable';
-      if (startAt <= now) state = 'expired';
-      else if (allowRequests && isRequestSlot(startAt, 30, now)) state = 'request';
-      return { startAt, state };
-    });
-    return { date: bookingDate(midnight), slots };
+    const date = shiftDate(weekStart, index);
+    const slots: { startAt: number; localMinute: number; state: SlotState; requestDurations?: number[] }[] = [];
+    for (let minute = start; minute < end; minute += stepMinutes) {
+      const startAt = ruleTimestamp(date, minute, timeZone);
+      if (!Number.isFinite(startAt)) continue;
+      const lengths = allowRequests ? lengthsAtWallTime(startAt, date, minute, now, rules) : [];
+      const state: SlotState = expired(startAt, now, leadMinutes) ? 'expired' : lengths.length ? 'request' : 'unavailable';
+      slots.push({ startAt, localMinute: minute, state, ...(lengths.length ? { requestDurations: lengths } : {}) });
+    }
+    return { date, slots };
   });
-  return { now, week, maxWeek, weekStart: bookingDate(start), days, durations: REQUEST_DURATIONS };
+  return { now, week, maxWeek, weekStart, days, durations: rules.durations, grid: { start, end, timeZone, stepMinutes, leadMinutes } };
 }
 
 // Accept a bare address rather than a display name or a list of recipients.

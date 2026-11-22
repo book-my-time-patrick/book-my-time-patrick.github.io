@@ -1,7 +1,8 @@
 import type { Context, Hono } from 'hono';
 import { parseEmailAddress } from '../shared/booking.js';
+import { coverageFor, readRules, syncCoverage } from './booking-rules.js';
 import { AuthError, requireAdmin } from './auth.js';
-import { CALENDAR_FRESH_MS, CALENDAR_WINDOW_MS, mergeBusyRanges } from './calendar-availability.js';
+import { CALENDAR_FRESH_MS, mergeBusyRanges } from './calendar-availability.js';
 import type { BusyRange } from './calendar-availability.js';
 import {
   CalendarProviderError, discoverIcloudCalendars, exchangeMicrosoftCode, listMicrosoftCalendars,
@@ -83,11 +84,12 @@ async function sourceRevision(db: SqlDatabase, provider: Provider) {
   return db.prepare('SELECT revision FROM calendar_sources WHERE provider=?').bind(provider).first<string>('revision');
 }
 
-function makeWindow(now: number) {
-  return { startAt: now, endAt: now + CALENDAR_WINDOW_MS + CALENDAR_FRESH_MS };
+async function makeWindow(db: SqlDatabase, now: number) {
+  const coverage = await syncCoverage(db, now);
+  return { startAt: now - coverage.before, endAt: now + coverage.after + CALENDAR_FRESH_MS };
 }
 
-function summarize(intervals: BusyInterval[], window: ReturnType<typeof makeWindow>) {
+function summarize(intervals: BusyInterval[], window: Awaited<ReturnType<typeof makeWindow>>) {
   const ranges = intervals.flatMap(({ startAt, endAt }): BusyRange[] => {
     const start = Math.max(window.startAt, startAt);
     const end = Math.min(window.endAt, endAt);
@@ -98,7 +100,7 @@ function summarize(intervals: BusyInterval[], window: ReturnType<typeof makeWind
   return JSON.stringify(merged);
 }
 
-async function collectBusy(source: Source, window: ReturnType<typeof makeWindow>, rotate: (next: OutlookSource) => Promise<void>) {
+async function collectBusy(source: Source, window: Awaited<ReturnType<typeof makeWindow>>, rotate: (next: OutlookSource) => Promise<void>) {
   if (source.provider === 'icloud') {
     const intervals = await Promise.all(source.calendarIds.map(id => readIcloudBusy(source.credentials, id, window)));
     return summarize(intervals.flat(), window);
@@ -111,7 +113,7 @@ async function collectBusy(source: Source, window: ReturnType<typeof makeWindow>
 async function saveSource(db: SqlDatabase, key: string, source: Source, expected: string | null,
   choice?: { sessionId: string; tokenHash: string }) {
   const now = Date.now();
-  const window = makeWindow(now);
+  const window = await makeWindow(db, now);
   let current = source;
   let busy: string;
   try {
@@ -138,9 +140,9 @@ async function refreshSource(db: SqlDatabase, key: string, provider: Provider) {
     .bind(now, provider, now - syncLock).first<{ config_encrypted: string; revision: string }>();
   if (!row) return;
   const identity = [provider, row.revision, now];
-  const window = makeWindow(now);
   const currentAttempt = 'provider=? AND revision=? AND sync_started_at=?';
   try {
+    const window = await makeWindow(db, now);
     const source = JSON.parse(await decryptSecret(row.config_encrypted, key, `calendar-${provider}`)) as Source;
     if (source.provider !== provider) throw new Error('Invalid stored source');
     const busy = await collectBusy(source, window, async next => {
@@ -164,13 +166,14 @@ export async function refreshCalendars(env: Environment) {
   ]);
 }
 
-function isFresh(row: SourceRow | undefined, now: number) {
+function isFresh(row: SourceRow | undefined, now: number, coverage: ReturnType<typeof coverageFor>) {
   return Boolean(row && !row.last_error && row.synced_at !== null && row.synced_at > now - CALENDAR_FRESH_MS && row.synced_at <= now
-    && row.covered_from !== null && row.covered_from <= now && row.covered_until !== null && row.covered_until >= now + CALENDAR_WINDOW_MS);
+    && row.covered_from !== null && row.covered_from <= now - coverage.before && row.covered_until !== null && row.covered_until >= now + coverage.after);
 }
 
 async function adminState(db: SqlDatabase, key: string, sessionId: string) {
   const now = Date.now();
+  const coverage = coverageFor((await readRules(db)).rules);
   const [rows, toggle, flow] = await Promise.all([
     db.prepare(`SELECT provider,synced_at,covered_from,covered_until,last_error,sync_started_at FROM calendar_sources`).all<SourceRow>(),
     db.prepare('SELECT direct_enabled FROM calendar_settings WHERE id=1').first<number>('direct_enabled'),
@@ -182,7 +185,7 @@ async function adminState(db: SqlDatabase, key: string, sessionId: string) {
     directEnabled: toggle === 1,
     sources: providers.map(provider => {
       const row = rows.results.find(item => item.provider === provider);
-      return { provider, connected: Boolean(row), ready: isFresh(row, now), syncedAt: row?.synced_at ?? null, error: row?.last_error ?? null,
+      return { provider, connected: Boolean(row), ready: isFresh(row, now, coverage), syncedAt: row?.synced_at ?? null, error: row?.last_error ?? null,
         syncing: row?.sync_started_at != null && row.sync_started_at > now - syncLock };
     }),
     outlookChoices,
@@ -324,10 +327,11 @@ export function mountCalendarSources(app: Hono<{ Bindings: Environment }>) {
     const enabled = (await input(c)).enabled;
     if (typeof enabled !== 'boolean') throw new AuthError(400, 'INVALID_INPUT');
     const now = Date.now();
+    const coverage = coverageFor((await readRules(db)).rules);
     const changed = await db.prepare(`UPDATE calendar_settings SET direct_enabled=? WHERE id=1 AND (?=0 OR (
       (SELECT COUNT(*) FROM calendar_sources WHERE synced_at>? AND synced_at<=? AND covered_from<=?
       AND covered_until>=? AND last_error IS NULL)=2 AND ${DIRECT_MAIL_GATE_SQL})) RETURNING id`)
-      .bind(Number(enabled), Number(enabled), now - CALENDAR_FRESH_MS, now, now, now + CALENDAR_WINDOW_MS).first();
+      .bind(Number(enabled), Number(enabled), now - CALENDAR_FRESH_MS, now, now - coverage.before, now + coverage.after).first();
     if (!changed) throw new AuthError(409, 'CALENDAR_NOT_READY');
     return c.json({ ok: true });
   });

@@ -1,4 +1,5 @@
 import type { Hono } from 'hono';
+import { readRules } from './booking-rules.js';
 import { AuthError } from './auth.js';
 import { decideBooking, findBooking } from './booking.js';
 import type { Environment } from './db.js';
@@ -23,7 +24,9 @@ async function pendingRequest(c: MailContext) {
 export function mountBookingReview(app: Hono<{ Bindings: Environment }>) {
   app.get('/api/request-action', async c => {
     const row = await pendingRequest(c);
-    return c.json({ name: row.name, startAt: row.start_at, endAt: row.end_at, meetingType: row.meeting_type });
+    const { rules: { timeZone, stepMinutes, durations, horizonDays } } = await readRules(c.env.DB!, row.invite_id);
+    return c.json({ name: row.name, startAt: row.start_at, endAt: row.end_at, meetingType: row.meeting_type,
+      ruleOptions: { timeZone, stepMinutes, durations, horizonDays } });
   });
   app.post('/api/request-action', async c => {
     const row = await pendingRequest(c);

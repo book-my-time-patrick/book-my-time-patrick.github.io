@@ -1,5 +1,6 @@
 import type { Context, Hono } from 'hono';
 import { BOOKING_DAY, bookingDate, REQUEST_HORIZON } from '../shared/booking.js';
+import { ruleDate } from '../shared/booking-rules.js';
 import { AuthError, requireAdmin } from './auth.js';
 import type { Environment } from './db.js';
 
@@ -55,8 +56,9 @@ async function readLocations(c: Ctx, from: string, through: string) {
   return { defaultCity: setting?.default_city ?? '', dates: overrides.results };
 }
 
-export async function withCalendarCities<T extends { date: string }>(c: Ctx, days: T[], now: number) {
-  const { today, lastDate } = locationWindow(now);
+export async function withCalendarCities<T extends { date: string }>(c: Ctx, days: T[], now: number, zone: string, horizon: number) {
+  const today = ruleDate(now, zone);
+  const lastDate = ruleDate(now + horizon * BOOKING_DAY, zone);
   const eligible = days.filter(day => day.date >= today && day.date <= lastDate);
   if (!eligible.length) return days;
   const locations = await readLocations(c, eligible[0].date, eligible[eligible.length - 1].date);

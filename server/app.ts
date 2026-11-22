@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { auditAdminWrite } from './admin-audit.js';
 import { AuthError, mountAuth } from './auth.js';
+import { mountBookingRules } from './booking-rules.js';
 import { mountBookings } from './booking.js';
 import { mountBookingReview } from './booking-review.js';
 import { mountCalendarLocation } from './calendar-location.js';
@@ -12,7 +14,6 @@ import type { Environment } from './db.js';
 
 export type { Environment } from './db.js';
 
-// M0 只暴露无个人信息的连通性探针。未实现的业务接口统一关闭。
 export function createApi() {
   const app = new Hono<{ Bindings: Environment }>();
 
@@ -49,10 +50,13 @@ export function createApi() {
 
   app.use('/api/*', bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json({ error: 'INVALID_INPUT' }, 413) }));
 
+  app.use('/api/admin/*', auditAdminWrite);
+
   app.get('/api/health', (context) => context.json({ ok: true, service: 'invite-api' }));
   mountAuth(app);
   mountInvites(app);
   mountBookings(app);
+  mountBookingRules(app);
   mountMailSettings(app);
   mountBookingReview(app);
   mountCalendarLocation(app);

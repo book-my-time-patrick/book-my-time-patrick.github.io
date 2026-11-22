@@ -1,4 +1,5 @@
 import type { Context, Hono } from 'hono';
+import { overrideJson, readRules } from './booking-rules.js';
 import type { Environment } from './db.js';
 import { AuthError, requireAdmin } from './auth.js';
 
@@ -6,7 +7,7 @@ type Ctx = Context<{ Bindings: Environment }>;
 const modules = ['profile','calendar','travel','tracks','investments','contact'];
 const modes = ['request','direct','open'];
 type Permissions = { modules: string[]; modes: string[]; hideBusy?: true };
-type InviteRow = { id:string; token_hash:string; label:string; permissions_json:string; created_at:number; expires_at:number; revoked_at:number|null; last_opened_at:number|null; open_count:number; kind:'invite'|'preview'; creator_session_id:string; direct_enabled:number; preview_invite_id:string|null };
+type InviteRow = { id:string; token_hash:string; label:string; permissions_json:string; created_at:number; expires_at:number; revoked_at:number|null; last_opened_at:number|null; open_count:number; kind:'invite'|'preview'; creator_session_id:string; direct_enabled:number; preview_invite_id:string|null; booking_rules_json:string|null };
 const defaults: Permissions = {modules:[...modules],modes:['request','open']};
 
 function random() { const bytes = crypto.getRandomValues(new Uint8Array(32)); return btoa(String.fromCharCode(...bytes)).replaceAll('+','-').replaceAll('/','_').replaceAll('=',''); }
@@ -39,29 +40,29 @@ export function invitationPermissions(row: InviteRow): Permissions {
 }
 function label(input: unknown) { if(typeof input !== 'string'||!input.trim()||input.trim().length>80) return fail(400,'INVALID_INPUT'); return input.trim(); }
 function expiry(input: unknown) { const date = typeof input==='number'?input:typeof input==='string'?Date.parse(input):NaN; if(!Number.isSafeInteger(date)||date<=Date.now()||date>Date.now()+3650*86400000) return fail(400,'INVALID_INPUT'); return date; }
-function view(row: InviteRow) { return {id:row.id,label:row.label,createdAt:row.created_at,expiresAt:row.expires_at,revokedAt:row.revoked_at,lastOpenedAt:row.last_opened_at,openCount:row.open_count,permissions:invitationPermissions(row)}; }
+function view(row: InviteRow) { return {id:row.id,label:row.label,createdAt:row.created_at,expiresAt:row.expires_at,revokedAt:row.revoked_at,lastOpenedAt:row.last_opened_at,openCount:row.open_count,permissions:invitationPermissions(row),bookingRules:JSON.parse(row.booking_rules_json??'null')}; }
 async function owner(c:Ctx) { const session=await requireAdmin(c); if(!session) return fail(401,'UNAUTHORIZED'); return session; }
 async function body(c:Ctx):Promise<Record<string,unknown>> { try { const data=await c.req.json(); if(!data||Array.isArray(data)||typeof data!=='object') return fail(400,'INVALID_INPUT'); return data; } catch { return fail(400,'INVALID_INPUT'); } }
 async function find(c:Ctx,id:string) { const row=await database(c).prepare("SELECT * FROM invites WHERE id=? AND kind='invite'").bind(id).first<InviteRow>(); if(!row)return fail(404,'NOT_FOUND'); return row; }
-async function issue(c:Ctx,creator:string,input:{label:string;expiresAt:number;permissions:Permissions;previewInviteId?:string},preview=false) {
+async function issue(c:Ctx,creator:string,input:{label:string;expiresAt:number;permissions:Permissions;previewInviteId?:string;bookingRules?:string|null},preview=false) {
  const db=database(c), token=random(), id=crypto.randomUUID(), now=Date.now();
  await db.prepare("DELETE FROM invites WHERE kind='preview' AND expires_at<=?").bind(now).run();
  const count=await db.prepare('SELECT COUNT(*) AS n FROM invites').first<{n:number}>();
  if((count?.n??0)>=5000) return fail(409,'LIMIT_REACHED');
  const directEnabled = Number(input.permissions.modes.includes('direct'));
- const row:InviteRow={id,token_hash:await digest(token),label:input.label,permissions_json:JSON.stringify(input.permissions),created_at:now,expires_at:input.expiresAt,revoked_at:null,last_opened_at:null,open_count:0,kind:preview?'preview':'invite',creator_session_id:creator,direct_enabled:directEnabled,preview_invite_id:input.previewInviteId??null};
- await db.prepare('INSERT INTO invites(id,token_hash,label,permissions_json,created_at,expires_at,kind,creator_session_id,direct_enabled,preview_invite_id) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(row.id,row.token_hash,row.label,row.permissions_json,now,row.expires_at,row.kind,creator,directEnabled,row.preview_invite_id).run();
+ const row:InviteRow={id,token_hash:await digest(token),label:input.label,permissions_json:JSON.stringify(input.permissions),created_at:now,expires_at:input.expiresAt,revoked_at:null,last_opened_at:null,open_count:0,kind:preview?'preview':'invite',creator_session_id:creator,direct_enabled:directEnabled,preview_invite_id:input.previewInviteId??null,booking_rules_json:input.bookingRules??null};
+ await db.prepare('INSERT INTO invites(id,token_hash,label,permissions_json,created_at,expires_at,kind,creator_session_id,direct_enabled,preview_invite_id,booking_rules_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(row.id,row.token_hash,row.label,row.permissions_json,now,row.expires_at,row.kind,creator,directEnabled,row.preview_invite_id,row.booking_rules_json).run();
  return {invite:view(row),token,url:`${c.env.SITE_ORIGIN}/#/i/${token}`,expiresAt:row.expires_at};
 }
 
 export function mountInvites(app:Hono<{Bindings:Environment}>) {
  app.get('/api/admin/invites',async c=>{
   await owner(c); const rows=await database(c).prepare("SELECT * FROM invites WHERE kind='invite' ORDER BY created_at DESC LIMIT 5000").all<InviteRow>();
-  return c.json({invites:rows.results.map(view),now:Date.now()});
+  return c.json({invites:rows.results.map(view),now:Date.now(),rules:(await readRules(database(c))).rules});
  });
  app.post('/api/admin/invites',async c=>{
   const session=await owner(c), data=await body(c);
-  return c.json(await issue(c,session.id,{label:label(data.label),expiresAt:expiry(data.expiresAt),permissions:permissions(data.permissions)}),201);
+  return c.json(await issue(c,session.id,{label:label(data.label),expiresAt:expiry(data.expiresAt),permissions:permissions(data.permissions),bookingRules:overrideJson(data.bookingRules)}),201);
  });
  app.patch('/api/admin/invites/:id',async c=>{
   await owner(c); const row=await find(c,c.req.param('id')),data=await body(c);
@@ -69,9 +70,10 @@ export function mountInvites(app:Hono<{Bindings:Environment}>) {
   const nextPermissions=data.permissions===undefined ? undefined : permissions(data.permissions);
   const next={label:data.label===undefined?row.label:label(data.label),expiry:data.expiresAt===undefined?row.expires_at:expiry(data.expiresAt)};
   const updated=await database(c).prepare(`UPDATE invites SET label=?,expires_at=?,permissions_json=COALESCE(?,permissions_json),
-    direct_enabled=COALESCE(?,direct_enabled) WHERE id=? AND revoked_at IS NULL RETURNING *`)
+    direct_enabled=COALESCE(?,direct_enabled),booking_rules_json=CASE WHEN ? THEN ? ELSE booking_rules_json END WHERE id=? AND revoked_at IS NULL RETURNING *`)
     .bind(next.label,next.expiry,nextPermissions ? JSON.stringify(nextPermissions) : null,
-      nextPermissions ? Number(nextPermissions.modes.includes('direct')) : null,row.id).first<InviteRow>();
+      nextPermissions ? Number(nextPermissions.modes.includes('direct')) : null,
+      Number(data.bookingRules !== undefined),overrideJson(data.bookingRules),row.id).first<InviteRow>();
   if(!updated) return fail(409,'INVITE_REVOKED');
   return c.json({invite:view(updated)});
  });
@@ -82,13 +84,13 @@ export function mountInvites(app:Hono<{Bindings:Environment}>) {
  });
  app.post('/api/admin/invites/:id/clone',async c=>{
   const session=await owner(c),row=await find(c,c.req.param('id'));
-  return c.json(await issue(c,session.id,{label:row.label,expiresAt:Math.max(row.expires_at,Date.now()+30*86400000),permissions:invitationPermissions(row)}),201);
+  return c.json(await issue(c,session.id,{label:row.label,expiresAt:Math.max(row.expires_at,Date.now()+30*86400000),permissions:invitationPermissions(row),bookingRules:row.booking_rules_json}),201);
  });
  app.post('/api/admin/preview',async c=>{
   const session=await owner(c),data=await body(c);
   const linked=typeof data.inviteId==='string'?await find(c,data.inviteId):null;
   const config=linked?invitationPermissions(linked):permissions(data.permissions);
-  const issued=await issue(c,session.id,{label:'预览',expiresAt:Date.now()+3600000,permissions:config,previewInviteId:linked?.id},true);
+  const issued=await issue(c,session.id,{label:'预览',expiresAt:Date.now()+3600000,permissions:config,previewInviteId:linked?.id,bookingRules:linked ? linked.booking_rules_json : overrideJson(data.bookingRules)},true);
   return c.json({url:issued.url,expiresAt:issued.expiresAt},201);
  });
  app.get('/api/invite',async c=>{

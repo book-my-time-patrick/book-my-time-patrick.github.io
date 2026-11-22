@@ -4,6 +4,7 @@ import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthe
 import { decodeClientDataJSON } from '@simplewebauthn/server/helpers';
 import type { AuthenticationResponseJSON, AuthenticatorTransport, RegistrationResponseJSON } from '@simplewebauthn/server';
 import type { Environment, SqlDatabase } from './db.js';
+import { markAdminActor } from './admin-audit.js';
 import { sessionExpiry } from './session-policy.js';
 import { base64url, decryptSecret, encryptSecret, equalText, fromBase64url, hmac, matchingTotpStep, newTotpSecret, randomToken, sha256 } from './security.js';
 
@@ -106,6 +107,7 @@ export async function requireAdmin(c: C, recent = false): Promise<AdminSession |
   };
   if (recent && session.recentAuthUntil <= now) throw new AuthError(403, 'REAUTH_REQUIRED');
   if (row.last_seen_at < now - 60_000) await db.prepare('UPDATE sessions SET last_seen_at=? WHERE id=? AND revoked_at IS NULL').bind(now, row.id).run();
+  markAdminActor(c, session.method);
   return session;
 }
 async function admin(c: C, recent = false): Promise<AdminSession> { const result = await requireAdmin(c, recent); if (!result) throw new AuthError(401, 'UNAUTHENTICATED'); return result; }

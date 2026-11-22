@@ -1,12 +1,11 @@
 import './admin.css';
+import { minuteOf, ruleTimestamp } from '../../shared/booking-rules';
+import type { BookingRules } from '../../shared/booking-rules';
+import { ruleTimeFields } from './admin-booking-rules';
 import { escapeHtml as e } from './ui';
 
 type Action = 'confirm' | 'decline' | 'suggest';
 const actions: Record<Action, string> = { confirm: '确认预约', decline: '拒绝申请', suggest: '发送建议时间' };
-const formatter = new Intl.DateTimeFormat('zh-CN', {
-  timeZone: 'Asia/Shanghai', dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23',
-});
-
 export function renderRequestReview(root: HTMLElement, token: string, action: Action) {
   const controller = new AbortController();
   const signal = controller.signal;
@@ -35,11 +34,14 @@ export function renderRequestReview(root: HTMLElement, token: string, action: Ac
   async function load() {
     page('正在读取申请', '<p class="admin-copy" role="status">请稍候…</p>');
     try {
-      const data = await request() as { name: string; startAt: number; endAt: number; meetingType: string };
+      const data = await request() as { name: string; startAt: number; endAt: number; meetingType: string;
+        ruleOptions: Pick<BookingRules, 'timeZone' | 'stepMinutes' | 'durations' | 'horizonDays'> };
       if (signal.aborted) return;
-      const times = `${formatter.format(data.startAt)}–${formatter.format(data.endAt)}（UTC+8）`;
-      const duration = Math.round((data.endAt - data.startAt) / 60_000);
-      const suggestion = action === 'suggest' ? `<div class="admin-form-row"><label class="admin-field">建议日期（UTC+8）<input type="date" name="date" required></label><label class="admin-field">建议开始时间<input type="time" name="time" min="09:00" max="20:30" step="1800" required></label></div><label class="admin-field">时长<select name="duration">${[30,60,90,120].map(value => `<option value="${value}"${value === duration ? ' selected' : ''}>${value} 分钟</option>`).join('')}</select></label>` : '';
+      const { timeZone } = data.ruleOptions;
+      const formatter = new Intl.DateTimeFormat('zh-CN', { timeZone, dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
+      const times = `${formatter.format(data.startAt)}–${formatter.format(data.endAt)}（${timeZone}）`;
+      const duration = (data.endAt - data.startAt) / 60_000;
+      const suggestion = action === 'suggest' ? ruleTimeFields(data.ruleOptions, undefined, duration) : '';
       page(actions[action], `<p class="admin-copy"><strong>${e(data.name)}</strong><br>${e(times)}<br>${data.meetingType === 'online' ? '线上' : '线下'}</p><form id="review-form">${suggestion}<label class="admin-field">给对方的留言（选填）<textarea name="message" maxlength="500" rows="3"></textarea></label><p class="admin-banner" id="review-message" role="status" aria-live="polite"></p><button class="primary" type="submit">${actions[action]}</button></form>`);
       const form = root.querySelector<HTMLFormElement>('#review-form')!;
       const submit = form.querySelector<HTMLButtonElement>('button')!;
@@ -52,7 +54,7 @@ export function renderRequestReview(root: HTMLElement, token: string, action: Ac
         const values = new FormData(form);
         const input: Record<string, unknown> = { action, message: String(values.get('message') ?? '') };
         if (action === 'suggest') {
-          input.startAt = Date.parse(`${values.get('date')}T${values.get('time')}:00+08:00`);
+          input.startAt = ruleTimestamp(String(values.get('date')), minuteOf(String(values.get('time'))), timeZone);
           input.duration = Number(values.get('duration'));
         }
         try {
@@ -66,8 +68,9 @@ export function renderRequestReview(root: HTMLElement, token: string, action: Ac
           const code = error instanceof Error ? error.message : '';
           if (code === 'NOT_FOUND' || code === 'BOOKING_CHANGED') { errorPage(new Error('NOT_FOUND')); return; }
           message.classList.add('error');
-          message.textContent = code === 'SLOT_CONFLICT' ? '该时段已有确认预约，请从后台建议其他时间。'
-            : code === 'SLOT_UNAVAILABLE' || code === 'INVALID_INPUT' ? '请选择规则范围内的工作日时段。'
+          message.textContent = code === 'BOOKING_LIMIT_REACHED' ? '该日或该周的普通预约已达上限。'
+            : code === 'SLOT_CONFLICT' ? '该时段已有确认预约，请从后台建议其他时间。'
+            : code === 'SLOT_UNAVAILABLE' || code === 'INVALID_INPUT' ? '请选择符合当前预约规则的时段。'
             : '暂时无法确认处理结果。你可以重试，或在后台查看这项申请。';
           submit.disabled = false;
         }

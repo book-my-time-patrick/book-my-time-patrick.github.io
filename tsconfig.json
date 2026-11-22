@@ -10,5 +10,5 @@
     "types": ["node", "vite/client"],
     "verbatimModuleSyntax": true
   },
-  "include": ["web/src", "server", "probes", "tests", "vite.config.ts"]
+  "include": ["web/src", "server", "probes", "scripts/verify-d1-export.ts", "tests", "vite.config.ts"]
 }

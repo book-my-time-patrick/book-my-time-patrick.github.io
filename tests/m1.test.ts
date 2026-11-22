@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { test } from 'node:test';
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { decryptSecret } from '../server/security.js';
 import type { PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/server';
 import { createApi } from '../server/app.js';
 import type { Environment } from '../server/db.js';
@@ -23,8 +28,8 @@ function cookie(response: Response): string {
   assert.ok(value, 'A successful login must issue a session cookie');
   return value.split(';', 1)[0];
 }
-async function harness() {
-  const DB = openSqlite(':memory:');
+async function harness(path = ':memory:') {
+  const DB = openSqlite(path);
   const migrationDir = new URL('../migrations/', import.meta.url);
   for (const path of (await readdir(migrationDir)).filter(path => path.endsWith('.sql')).sort()) DB.migrate(path, await readFile(new URL(path, migrationDir), 'utf8'));
   const setupToken = randomBytes(32).toString('base64url');
@@ -39,8 +44,8 @@ async function harness() {
   }
   return { DB, environment, setupToken, app, state, request };
 }
-async function configured(options: { remember?: boolean; zeroCounter?: boolean } = {}) {
-  const h = await harness();
+async function configured(options: { remember?: boolean; zeroCounter?: boolean; databasePath?: string } = {}) {
+  const h = await harness(options.databasePath);
   const authenticator = makeAuthenticator(rpID, origin);
   const pending = await h.request<SetupFlow>('/api/admin/setup/options', 'POST', { setupToken: h.setupToken });
   assert.equal(pending.response.status, 200);
@@ -407,4 +412,72 @@ test('有效记住会话九十天后仍可直接访问，主动退出后必须�
   assert.equal(signedIn.response.status,200);
   assert.ok(signedIn.cookie && signedIn.cookie !== remembered);
   assert.equal((await h.request('/api/admin/me','GET',undefined,{cookie:signedIn.cookie})).response.status,200);
+});
+
+test('M6 已授权的后台写入记录路由模板，日志不含账号、邀请信息或请求内容', async () => {
+  const h = await configured();
+  const issued = await invite(h);
+  assert.equal((await h.request('/api/admin/invites/' + issued.invite.id, 'PATCH', { label: 'Synthetic private label' })).response.status, 200);
+  assert.equal((await h.request('/api/admin/booking-rules', 'PATCH', { stepMinutes: 17 })).response.status, 400);
+  assert.equal((await h.request('/api/admin/booking-rules', 'PATCH', { stepMinutes: 15 }, { cookie: '' })).response.status, 401);
+  await h.request('/api/admin/invites');
+  const records = await h.DB.prepare('SELECT method,route,auth_method FROM admin_audit_log ORDER BY rowid').all();
+  assert.deepEqual(records.results.map(row => [row.method, row.route, row.auth_method]), [
+    ['POST', '/api/admin/invites', 'passkey'],
+    ['PATCH', '/api/admin/invites/:id', 'passkey'],
+  ]);
+  const all = JSON.stringify(await h.DB.prepare('SELECT * FROM admin_audit_log').all());
+  for (const value of [issued.token, issued.invite.id, 'Synthetic private label', '测试电脑', h.state.cookie]) assert.ok(!all.includes(value));
+  h.DB.close();
+});
+
+test('M6 SQLite 在线快照能恢复 WAL 中的写入、通行密钥登录和已发邀请', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'booking-restore-'));
+  const source = join(directory, 'source.sqlite');
+  const backup = join(directory, 'backup.sqlite');
+  const restoredPath = join(directory, 'restored.sqlite');
+  const backupScript = async (from: string, to: string) =>
+    promisify(execFile)(process.execPath, ['scripts/backup-sqlite.mjs', from, to]);
+  const h = await configured({ databasePath: source });
+  try {
+    const issued = await invite(h);
+    await h.request('/api/admin/booking-rules', 'PATCH', { stepMinutes: 15 });
+    assert.ok((await stat(source + '-wal')).size > 0);
+    const first = await backupScript(source, backup);
+    assert.match(first.stdout, /0010_admin_audit.sql/);
+    assert.equal((await stat(backup)).mode & 0o777, 0o600);
+    assert.equal((await h.request('/api/admin/booking-rules', 'PATCH', { stepMinutes: 30 })).response.status, 200);
+    await assert.rejects(backupScript(source, backup), /目标已存在/);
+    await backupScript(backup, restoredPath);
+    const DB = openSqlite(restoredPath);
+    try {
+      const restored = { ...h.environment, DB };
+      // Re-running the Node start-up migrations uses the restored ledger.
+      for (const name of (await readdir('migrations')).filter(name => name.endsWith('.sql')).sort()) {
+        DB.migrate(name, await readFile('migrations/' + name, 'utf8'));
+      }
+      const owner = await DB.prepare('SELECT totp_cipher FROM owners WHERE id=1').first<{ totp_cipher: string }>();
+      assert.equal(await decryptSecret(owner!.totp_cipher, restored.DATA_ENCRYPTION_KEY!), h.secret);
+      await assert.rejects(decryptSecret(owner!.totp_cipher, randomBytes(32).toString('base64url')));
+      const flow = await h.request<LoginFlow>('/api/admin/login/options', 'POST', {}, { cookie: '', environment: restored });
+      assert.equal(flow.response.status, 200);
+      const auth = await h.request('/api/admin/login/verify', 'POST', {
+        flowId: flow.data.flowId, response: h.authenticator.authenticate(flow.data.options),
+      }, { cookie: '', environment: restored });
+      assert.equal(auth.response.status, 200);
+      const rules = await h.request<{ rules: { stepMinutes: number } }>('/api/admin/booking-rules', 'GET', undefined,
+        { cookie: cookie(auth.response), environment: restored });
+      assert.equal(rules.data.rules.stepMinutes, 15);
+      const calendar = await h.request<{ grid: { stepMinutes: number } }>('/api/invite/calendar', 'GET', undefined,
+        { cookie: '', environment: restored, headers: { Authorization: 'Bearer ' + issued.token } });
+      assert.equal(calendar.response.status, 200);
+      assert.equal(calendar.data.grid.stepMinutes, 15);
+      assert.equal(await DB.prepare('SELECT COUNT(*) AS n FROM admin_audit_log').first<number>('n'), 2);
+    } finally {
+      DB.close();
+    }
+  } finally {
+    h.DB.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

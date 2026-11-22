@@ -1,4 +1,7 @@
 import './admin.css';
+import { DEFAULT_RULES } from '../../shared/booking-rules';
+import type { BookingRules } from '../../shared/booking-rules';
+import { bindInviteRuleFields, inviteRuleFields, readRuleFields, renderBookingRules } from './admin-booking-rules';
 import { startAuthentication, startRegistration, WebAuthnAbortService } from '@simplewebauthn/browser';
 import { copyText, escapeHtml as e, formatTime, modeNames, moduleNames } from './ui';
 import { createSetupQr } from './qr';
@@ -22,8 +25,8 @@ interface Session { id: string; label: string; os: string; browser: string; meth
 interface Me { id: string; name: string; session: Session }
 interface PasswordSettings { enabled: boolean; revision: string | null; updatedAt: number | null }
 interface GeneratedPassword { password: string; revision: string; updatedAt: number }
-interface Invite { id: string; label: string; createdAt: Time; expiresAt: Time; revokedAt: Time | null; lastOpenedAt: Time | null; openCount: number; permissions: Permissions }
-interface InviteList { invites: Invite[]; now: number }
+interface Invite { id: string; label: string; createdAt: Time; expiresAt: Time; revokedAt: Time | null; lastOpenedAt: Time | null; openCount: number; permissions: Permissions; bookingRules?: Partial<BookingRules> | null }
+interface InviteList { invites: Invite[]; now: number; rules?: BookingRules }
 interface Passkey { id: string; name: string; createdAt: Time; lastUsedAt: Time | null; backedUp: boolean; deviceType: string }
 interface Options<T> { flowId: string; options: T }
 interface Setup extends Options<RegistrationOptions> { totpSecret: string; totpUri: string }
@@ -61,8 +64,10 @@ function messageFor(error: unknown): string {
     if (error.code === 'OPEN_FULL') return '这个开放局的名额已满。请刷新预约列表。';
     if (error.code === 'SLOT_CONFLICT' && error.phase === 'OPEN_ADMIN') return '开放局与已有日程或其他开放局重叠。请调整时间再发布。';
     if (error.code === 'SLOT_UNAVAILABLE' && error.phase === 'OPEN_ADMIN') return '请选择未来 30 天内的时间，整段时长需在北京时间 09:00–21:00 内。';
-    if (error.code === 'SLOT_CONFLICT') return '这个时间与站内已确认的预约重叠。请建议其他时间。';
-    if (error.code === 'SLOT_UNAVAILABLE') return '这个时间已过去或超出申请范围。请选择未来工作日的其他时间。';
+    if (error.code === 'INVALID_BOOKING_RULES') return '请检查时段、屏蔽日期、时区和数值，并至少选择一项时长。';
+    if (error.code === 'BOOKING_LIMIT_REACHED') return '该日或该周的普通预约已达上限。请选择其他时间。';
+    if (error.code === 'SLOT_CONFLICT') return '该时段或其缓冲时间与已有预约或开放局重叠。请选择其他时间。';
+    if (error.code === 'SLOT_UNAVAILABLE') return '这个时间已过去或超出当前预约规则。请选择其他时间。';
     if (error.code === 'INVALID_CITY') return '请填写不超过 24 个字符的城市名称，例如深圳或香港。';
     if (error.code === 'INVALID_DATE_RANGE') return '请选择北京时间今天起 30 天内的日期，结束日期不能早于开始日期。';
     if (error.code === 'CALENDAR_AUTH_REQUIRED') return '日历服务拒绝授权。请核对 App 专用密码或 Microsoft 授权。';
@@ -125,7 +130,8 @@ export function renderAdmin(root: HTMLElement): () => void {
   let me: Me | null = null;
   const returnPrefix = '#/admin/calendar-return?';
   let calendarReturn = location.hash.startsWith(returnPrefix) ? new URLSearchParams(location.hash.slice(returnPrefix.length)) : null;
-  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' | 'open' = calendarReturn ? 'calendars' : 'invites';
+  let inviteRules = DEFAULT_RULES;
+  let tab: 'invites' | 'devices' | 'passkeys' | 'password' | 'requests' | 'mail' | 'location' | 'calendars' | 'open' | 'rules' = calendarReturn ? 'calendars' : 'invites';
   if (calendarReturn) history.replaceState(null, '', '#/admin');
   let requestFilter: RequestFilter = 'pending';
   let passwordEnabled = false;
@@ -471,6 +477,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       open: ['开放局', '选活动类型和日期，发布可报名的活动。'],
       requests: ['预约申请', '处理待确认的申请，查看已确认的预约。'],
       mail: ['邮箱设置', '配置发信服务，验证接收预约通知和日历附件的邮箱。'],
+      rules: ['预约规则', '设置普通预约的可约时间、缓冲和上限。'],
       location: ['日历地点', '设置预约周历中的城市，按日期调整地点。'],
       calendars: ['日历连接', '同步私人和工作日历的忙闲，设置直接预约。'],
       devices: ['登录设备', '查看和管理能够进入后台的浏览器登录。'],
@@ -484,7 +491,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     void action(async () => {
       if (tab === 'invites') {
         const data = await request<InviteList>('/admin/invites');
-        if (rootIsCurrent(version)) { observeInviteTime(data.now); showInvites(data.invites); }
+        if (rootIsCurrent(version)) { inviteRules = data.rules ?? DEFAULT_RULES; observeInviteTime(data.now); showInvites(data.invites); }
       } else if (tab === 'devices') {
         const data = await request<{ devices: Session[] }>('/admin/devices');
         if (rootIsCurrent(version)) showDevices(data.devices);
@@ -499,7 +506,7 @@ export function renderAdmin(root: HTMLElement): () => void {
       }
     });
   }
-  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars' | 'open', version: number) {
+  async function showBookingPanel(panel: 'requests' | 'mail' | 'location' | 'calendars' | 'open' | 'rules', version: number) {
     const content = root.querySelector<HTMLElement>('#admin-content');
     if (!content) return;
     const isCurrent = () => rootIsCurrent(version) && me !== null;
@@ -517,6 +524,13 @@ export function renderAdmin(root: HTMLElement): () => void {
         if (!isCurrent()) return;
         renderBookingInbox(content, requests, filter, actions, next => { requestFilter = next; showDashboard(); });
         if (message) banner(message);
+      };
+      const actions: PanelActions = { request, run, banner, isCurrent, reload };
+      await reload();
+    } else if (panel === 'rules') {
+      const reload = async () => {
+        const { rules } = await request<{ rules: BookingRules }>('/admin/booking-rules');
+        if (isCurrent()) renderBookingRules(content, rules, actions);
       };
       const actions: PanelActions = { request, run, banner, isCurrent, reload };
       await reload();
@@ -620,7 +634,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     displayedInvites = new Map(invites.map(invite => [invite.id, invite]));
     const version = revision;
     const permissions = editing?.permissions ?? { modules: ['profile', 'calendar', 'contact'], modes: ['request', 'open'] };
-    content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(localDate(editing?.expiresAt ?? inviteNow() + 30 * 86_400_000))}" required></label>${permissionsForm(permissions)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。在「邮箱设置」开放预约申请后，勾选「申请时间」的邀请可接收申请。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
+    content.innerHTML = `<div class="admin-grid"><section class="admin-card"><div class="admin-section-head"><h2>${editing ? '编辑邀请' : '创建专属链接'}</h2>${editing ? '<button class="text-button" id="cancel-edit" type="button">取消</button>' : ''}</div><form id="invite-form"><label class="admin-field">备注名称<input name="label" maxlength="80" value="${e(editing?.label ?? '')}" placeholder="例如：给一位朋友" required><span class="admin-help">仅你可见，不会显示给受邀者。</span></label><label class="admin-field">有效期至 · 当前设备时区<input name="expiresAt" type="datetime-local" value="${e(localDate(editing?.expiresAt ?? inviteNow() + 30 * 86_400_000))}" required></label>${permissionsForm(permissions)}${inviteRuleFields(inviteRules, editing?.bookingRules)}<div class="admin-actions"><button class="primary" type="submit">${editing ? '保存设置' : '创建链接'} <span aria-hidden="true">↗</span></button><button class="secondary" id="preview-draft" type="button">预览当前设置</button></div></form><p class="admin-inline-note">邀请链接仅在创建时提供，请复制保存。之后可复制为新链接。在「邮箱设置」开放预约申请后，勾选「申请时间」的邀请可接收申请。</p></section><section class="admin-card"><div class="admin-section-head"><h2>我的邀请</h2><span class="admin-count">${invites.length} 条</span></div><div id="new-link"></div><div class="admin-list" id="invite-list"></div></section></div>`;
     content.querySelector('#cancel-edit')?.addEventListener('click', () => showInvites([...displayedInvites.values()]));
     const list = content.querySelector<HTMLElement>('#invite-list')!;
     const updateRows: ((now: number) => number | null)[] = [];
@@ -688,23 +702,25 @@ export function renderAdmin(root: HTMLElement): () => void {
     refreshInviteBadges = updateBadges;
     updateBadges();
     const form = content.querySelector<HTMLFormElement>('#invite-form')!;
+    bindInviteRuleFields(form);
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       const expiresAt = new Date(formValue(form, 'expiresAt'));
       if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= inviteNow()) { banner('请选择未来的有效期。', true); return; }
-      const payload = { label: formValue(form, 'label'), expiresAt: expiresAt.toISOString(), permissions: readPermissions(form) };
+      const payload = { label: formValue(form, 'label'), expiresAt: expiresAt.toISOString(), permissions: readPermissions(form), bookingRules: readRuleFields(form) };
       void action(async () => {
         const result = await request<{ invite: Invite; url?: string }>(editing ? `/admin/invites/${encodeURIComponent(editing.id)}` : '/admin/invites', payload, editing ? 'PATCH' : 'POST');
         await refreshInvites(result.url ? { invite: result.invite, url: result.url } : undefined, version);
         if (rootIsCurrent(version)) banner(editing ? '邀请设置已保存。' : '邀请已创建，请复制保存专属链接。');
       }, form.querySelector<HTMLButtonElement>('[type="submit"]')!);
     });
-    content.querySelector<HTMLButtonElement>('#preview-draft')!.addEventListener('click', (event) => void action(() => createPreview({ permissions: readPermissions(form) }), event.currentTarget as HTMLButtonElement));
+    content.querySelector<HTMLButtonElement>('#preview-draft')!.addEventListener('click', (event) => void action(() => createPreview({ permissions: readPermissions(form), bookingRules: readRuleFields(form) }), event.currentTarget as HTMLButtonElement));
   }
   async function refreshInvites(created?: { invite: Invite; url: string }, expectedRevision = revision) {
     if (created) recentLinks.set(created.invite.id, created.url);
     const data = await request<InviteList>('/admin/invites');
     if (!rootIsCurrent(expectedRevision) || tab !== 'invites' || !me) return;
+    inviteRules = data.rules ?? DEFAULT_RULES;
     observeInviteTime(data.now);
     showInvites(data.invites);
     if (created) showNewLink(created.invite.id, created.url);
@@ -739,7 +755,7 @@ export function renderAdmin(root: HTMLElement): () => void {
     await showCopyResult(url);
   }
   async function showCopyResult(url: string) { const ok = await copyText(url); banner(ok ? '已复制链接。' : '浏览器未允许复制，请选中链接手动复制。', !ok); }
-  async function createPreview(payload: { inviteId?: string; permissions?: Permissions }) {
+  async function createPreview(payload: { inviteId?: string; permissions?: Permissions; bookingRules?: Partial<BookingRules> }) {
     const version = revision;
     const result = await request<{ url: string; expiresAt: Time }>('/admin/preview', payload);
     if (!rootIsCurrent(version)) return;
