@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
+<title>方案B · 苹果日历</title>
+<style>
+:root{
+  --bg:#f2f2f7; --card:#ffffff; --ink:#1c1c1e; --sub:#6b6b70; --line:#e5e5ea; --line2:#f0f0f3; --fill:#f2f2f7;
+  --accent:#0062cc; --accent-fill:#0062cc; --red:#ff3b30; --hatch:#f2f2f5; --hatch2:#e6e6eb;
+  --busy:#8e8e9a; --green:#28a745; --plum:#a24fd4; --amber:#e08a00; --blue:#0a7aff;
+  --mix:14%; --txt-mix:62%;
+  --slot:22px; --gutter:48px;
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;
+}
+:root[data-theme=dark]{
+  --bg:#141416; --card:#1e1e20; --ink:#f2f2f7; --sub:#98989f; --line:#38383a; --line2:#2b2b2e; --fill:#2a2a2d;
+  --accent:#0a84ff; --accent-fill:#0a6fe0; --red:#ff453a; --hatch:#212124; --hatch2:#2c2c30;
+  --busy:#9a9aa8; --green:#32d74b; --plum:#bf5af2; --amber:#ff9f0a; --blue:#64a8ff;
+  --mix:24%; --txt-mix:100%;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme=light]){
+    --bg:#141416; --card:#1e1e20; --ink:#f2f2f7; --sub:#98989f; --line:#38383a; --line2:#2b2b2e; --fill:#2a2a2d;
+    --accent:#0a84ff; --accent-fill:#0a6fe0; --red:#ff453a; --hatch:#212124; --hatch2:#2c2c30;
+    --busy:#9a9aa8; --green:#32d74b; --plum:#bf5af2; --amber:#ff9f0a; --blue:#64a8ff;
+    --mix:24%; --txt-mix:100%;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45;min-height:100vh}
+button,input,select,textarea{font:inherit;color:inherit}
+.tag{position:fixed;left:14px;bottom:10px;font-size:11px;color:var(--sub);background:var(--card);border:1px solid var(--line);padding:3px 9px;border-radius:99px;z-index:9}
+.wrap{max-width:1240px;margin:0 auto;padding:22px 20px 48px;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:22px;align-items:start}
+.cal{background:var(--card);border-radius:14px;border:1px solid var(--line);padding:16px 16px 10px;overflow:hidden}
+.top{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.top h1{margin:0;font-size:28px;letter-spacing:-.03em;font-weight:760}
+.top h1 span{font-weight:500;color:var(--sub);font-size:15px;margin-left:8px;letter-spacing:0}
+.sp{flex:1}
+.chip{white-space:nowrap;border:0;background:var(--fill);color:var(--ink);height:30px;min-width:30px;padding:0 12px;border-radius:15px;font-size:13px;cursor:pointer}
+.chip:hover{filter:brightness(.97)}
+.seg{display:inline-flex;background:var(--fill);border-radius:9px;padding:2px}
+.seg button{border:0;background:transparent;height:26px;padding:0 13px;border-radius:7px;font-size:12.5px;color:var(--sub);cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--card);color:var(--ink);font-weight:600;box-shadow:0 1px 3px #0003}
+.dow,.allday,.cols{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));margin-left:var(--gutter)}
+.dow div{display:flex;align-items:baseline;justify-content:center;gap:5px;padding:4px 0 6px;color:var(--sub);font-size:13px}
+.dow b{font-size:19px;font-weight:500;color:var(--ink);min-width:28px;height:28px;display:inline-grid;place-items:center;border-radius:14px;line-height:1}
+.dow .today b{background:var(--red);color:#fff;font-weight:600}
+.dow .today{color:var(--red)}
+.dow .wk{position:absolute;left:0;width:var(--gutter);text-align:right;padding-right:8px;font-size:11px}
+.headwrap{position:relative}
+.allday{border-top:1px solid var(--line);border-bottom:2px solid var(--line);position:relative;min-height:30px}
+.allday::before{content:"全天";position:absolute;left:calc(var(--gutter)*-1);width:var(--gutter);padding-right:8px;text-align:right;top:6px;font-size:11px;color:var(--sub)}
+.allday div{padding:3px 3px;border-left:1px solid var(--line2);display:flex;align-items:center;min-width:0}
+.loc{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%;font-size:12px;font-weight:500;padding:2px 8px 2px 6px;border-radius:99px;color:var(--ink);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.loc svg{width:12px;height:12px;stroke:var(--accent);fill:none;stroke-width:1.7;flex:none}
+.loc span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grid{position:relative}
+.gutter span{position:absolute;left:0;width:var(--gutter);text-align:right;padding-right:8px;transform:translateY(-50%);font-size:11px;color:var(--sub);font-variant-numeric:tabular-nums}
+.col{position:relative;border-left:1px solid var(--line2);
+  background:repeating-linear-gradient(180deg,transparent 0 calc(var(--slot)*2 - 1px),var(--line) calc(var(--slot)*2 - 1px) calc(var(--slot)*2))}
+.col .half{position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(180deg,transparent 0 calc(var(--slot) - 1px),var(--line2) calc(var(--slot) - 1px) var(--slot))}
+.hatch{position:absolute;left:0;right:0;background:repeating-linear-gradient(135deg,var(--hatch) 0 4px,var(--hatch2) 4px 5px);opacity:.9}
+.hatch.past{opacity:.55}
+.ev{position:absolute;left:2px;right:3px;border-radius:5px;border-left:3px solid var(--c);
+  background:color-mix(in srgb,var(--c) var(--mix),var(--card));color:color-mix(in srgb,var(--c) var(--txt-mix),var(--ink));
+  padding:2px 6px;font-size:11.5px;line-height:1.25;overflow:hidden;font-weight:600;z-index:1}
+.ev small{display:block;font-weight:500;opacity:.85;font-size:11px}
+.ev.busy{--c:var(--busy);font-weight:500}
+.ev.green{--c:var(--green)} .ev.plum{--c:var(--plum)} .ev.amber{--c:var(--amber)} .ev.blue{--c:var(--blue)}
+.ev.full{opacity:.55}
+.ev.sel{--c:var(--accent);background:var(--accent-fill);color:#fff;border-left-color:#ffffff66;z-index:3;pointer-events:none;box-shadow:0 2px 8px #0a7aff55}
+.free{position:absolute;left:0;right:0}
+.free button{display:block;width:100%;height:var(--slot);border:0;background:transparent;color:var(--accent);font-size:11px;text-align:left;padding:0 7px;cursor:pointer;opacity:1}
+.free button span{opacity:0;font-weight:600}
+.free button:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.free button:hover span,.free button:focus-visible span{opacity:1}
+.free button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.now{position:absolute;left:var(--gutter);right:0;border-top:1.5px solid var(--red);z-index:4;pointer-events:none}
+.now::before{content:"";position:absolute;left:calc(var(--nowx) - 4px);top:-5px;width:8px;height:8px;border-radius:50%;background:var(--red)}
+.now em{position:absolute;left:calc(var(--gutter)*-1);width:var(--gutter);text-align:right;padding-right:4px;top:-8px;font-style:normal;font-size:11px;font-weight:600;color:var(--red);background:var(--card)}
+.foot{display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:10px 2px 4px var(--gutter);font-size:11.5px;color:var(--sub)}
+.foot i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.foot .r{margin-left:auto}
+/* editor */
+.editor{position:sticky;top:18px}
+.editor h2{margin:0 0 2px;font-size:22px;letter-spacing:-.02em}
+.editor p.s{margin:0 0 12px;color:var(--sub);font-size:12.5px}
+.group{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden}
+.row{display:flex;align-items:center;gap:10px;min-height:42px;padding:0 14px;border-top:1px solid var(--line2)}
+.row:first-child{border-top:0}
+.row label{color:var(--ink);min-width:52px;font-size:14px}
+.row select,.row input{flex:1;min-width:0;height:40px;border:0;background:transparent;text-align:right;font-size:14px;color:var(--accent);padding:0;outline:0}
+.row input{color:var(--ink)} .row input::placeholder{color:var(--sub)}
+.row select{direction:rtl;appearance:none;-webkit-appearance:none}
+.row select option{direction:ltr}
+.row textarea{flex:1;border:0;background:transparent;padding:10px 0;min-height:60px;resize:none;outline:0}
+.row textarea::placeholder{color:var(--sub)}
+.row:focus-within{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.row .seg{margin-left:auto}
+.when{padding:12px 14px}
+.when small{color:var(--sub);font-size:12px}
+.when strong{display:block;font-size:19px;letter-spacing:-.01em;margin:1px 0}
+.when span{color:var(--sub);font-size:13px}
+.go{width:100%;height:46px;border:0;border-radius:12px;background:var(--accent-fill);color:#fff;font-size:15.5px;font-weight:600;cursor:pointer}
+.go:hover{filter:brightness(1.06)}
+.cp{width:100%;margin-top:8px;height:40px;border:0;border-radius:12px;background:var(--fill);cursor:pointer;color:var(--accent);font-weight:550}
+.fine{font-size:12px;color:var(--sub);margin:10px 2px 0}
+.receipt{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.receipt strong{display:block;font-size:16px;margin-bottom:3px}
+@media (max-width:980px){.wrap{grid-template-columns:1fr;padding:12px 10px 70px}.editor{position:static}}
+@media (max-width:640px){
+  :root{--gutter:30px;--slot:30px}
+  .cal{padding:12px 8px 8px;border-radius:12px}
+  .top h1{font-size:18px;white-space:nowrap}.top h1 span{display:none}
+  .chip{padding:0 7px;min-width:28px}.top{gap:5px}.seg button{padding:0 8px}.top h1{font-size:17px}
+  .dow div{flex-direction:column;align-items:center;gap:0;font-size:11px}
+  .dow b{font-size:16px;min-width:24px;height:24px}
+  .loc svg{display:none}.loc{padding:2px 5px;font-size:10.5px}
+  .ev{padding:1px 3px;font-size:10px;left:1px;right:1px}.ev small{display:none}
+  .free button span{display:none}
+  .gutter span{font-size:10px;padding-right:4px}
+  .seg button{padding:0 9px}
+}
+</style>
+</head>
+<body>
+<span class="tag">方案 B · 苹果日历（深浅色）— 视觉原型，示例数据</span>
+<div class="wrap">
+  <section class="cal" aria-label="预约日历">
+    <div class="top">
+      <h1>2026 年 11 月<span>第 48 周</span></h1>
+      <span class="sp"></span>
+      <div class="seg" aria-label="视图"><button aria-pressed="true">周</button><button aria-pressed="false">日</button></div>
+      <button class="chip" aria-label="上一周">‹</button><button class="chip">今天</button><button class="chip" aria-label="下一周">›</button>
+      <button class="chip" id="theme" aria-label="切换深浅色">◐</button>
+    </div>
+    <div class="headwrap"><div class="dow" id="dow"></div></div>
+    <div class="allday" id="allday"></div>
+    <div class="grid" id="grid"><div class="gutter" id="gutter"></div><div class="cols" id="cols" style="margin-left:var(--gutter)"></div></div>
+    <div class="foot">
+      <span><i style="background:color-mix(in srgb,var(--busy) 30%,var(--card));border-left:3px solid var(--busy)"></i>已占用</span>
+      <span><i style="background:color-mix(in srgb,var(--plum) 30%,var(--card));border-left:3px solid var(--plum)"></i>开放局</span>
+      <span><i style="background:var(--accent-fill)"></i>已选</span>
+      <span>空白处点击即可选时间</span>
+      <span class="r">忙闲约 3 分钟前同步 · 北京时间 UTC+8</span>
+    </div>
+  </section>
+
+  <aside class="editor" aria-label="预约">
+    <h2>新建预约</h2>
+    <p class="s">占用时段的细节保持私密，邀请人会邮件确认。</p>
+    <div id="form">
+      <div class="group"><div class="when"><small>已选时段</small><strong id="c-day">—</strong><span id="c-time">—</span></div></div>
+      <div class="group">
+        <div class="row"><label>时长</label><div class="seg" id="dur"></div></div>
+        <div class="row"><label for="sd">日期</label><select id="sd"></select></div>
+        <div class="row"><label for="st">开始</label><select id="st"></select></div>
+      </div>
+      <div class="group">
+        <div class="row"><label for="nm">姓名</label><input id="nm" placeholder="必填" autocomplete="off"></div>
+        <div class="row"><label for="em">邮箱</label><input id="em" placeholder="用于接收确认" inputmode="email" autocomplete="off"></div>
+        <div class="row"><textarea id="nt" placeholder="想聊什么？（可选）"></textarea></div>
+      </div>
+      <button class="go" id="go">提交申请</button>
+      <button class="cp" id="cp">复制申请文字</button>
+      <p class="fine">这只是预约请求，不会直接占用日程，以邀请人的回复确认为准。</p>
+    </div>
+  </aside>
+</div>
+
+<script>
+const $=(s,r=document)=>r.querySelector(s), el=(t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e;};
+const fmt=m=>String(m/60|0).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+const H0=540,H1=1260,STEP=30,NOW={d:0,m:660};
+const WD=['周一','周二','周三','周四','周五','周六','周日'],DATE=[23,24,25,26,27,28,29];
+const CITY=['深圳','深圳','深圳','香港','香港','北京','北京'];
+const BUSY=[[[780,870],[960,1020]],[[600,720],[1020,1110]],[[540,660],[900,1020]],[[570,720],[840,960]],[[600,720],[810,900]],[],[]];
+const OPEN=[{d:2,s:720,e:780,t:'Lunch',c:'green',n:'剩 1 席'},{d:3,s:1140,e:1260,t:'Dinner',c:'plum',n:'剩 3 席'},{d:5,s:600,e:660,t:'Coffee chat',c:'amber',n:'剩 2 席'},{d:6,s:900,e:960,t:'Airport chat',c:'blue',n:'已满'}];
+const openAt=(d,m)=>OPEN.find(o=>o.d===d&&m>=o.s&&m<o.e)||null;
+const stateAt=(d,m)=>d<NOW.d||(d===NOW.d&&m<NOW.m)?'past':openAt(d,m)?'open':BUSY[d].some(([s,e])=>m>=s&&m<e)?'busy':d>=5?'closed':'free';
+function blocks(d){const out=[];for(let m=H0;m<H1;m+=STEP){const s=stateAt(d,m),o=s==='open'?openAt(d,m):null,l=out[out.length-1];
+  if(l&&l.s===s&&l.o===o)l.e=m+STEP;else out.push({s,o,st:m,e:m+STEP});}return out;}
+const sel={d:1,s:840,dur:60},DURS=[30,60,90,120];
+const fits=(d,s,dur)=>{if(s+dur>H1)return false;for(let m=s;m<s+dur;m+=STEP)if(stateAt(d,m)!=='free')return false;return true;};
+function pick(d,m){sel.d=d;sel.s=m;if(!fits(d,m,sel.dur))sel.dur=[...DURS].reverse().find(x=>fits(d,m,x))||30;refresh();}
+const slotPx=()=>parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--slot'));
+const yOf=m=>(m-H0)/STEP*slotPx();
+
+function build(){
+  const px=slotPx(),h=(H1-H0)/STEP*px;
+  $('#dow').innerHTML=`<span class="wk"></span>`+WD.map((w,i)=>`<div class="${i===NOW.d?'today':''}"><b>${DATE[i]}</b><span>${w}</span></div>`).join('');
+  $('#allday').innerHTML=CITY.map(c=>`<div><span class="loc"><svg viewBox="0 0 16 16"><path d="M8 14s4.500-4.200 4.500-7.500a4.500 4.500 0 1 0-9 0C3.500 9.800 8 14 8 14Z"/><circle cx="8" cy="6.500" r="1.600"/></svg><span>${c}</span></span></div>`).join('');
+  $('#grid').style.height=h+'px';
+  $('#gutter').innerHTML='';for(let m=H0;m<H1;m+=60){const s=el('span',null,fmt(m));s.style.top=yOf(m)+'px';if(m===H0)s.style.transform='translateY(2px)';$('#gutter').append(s);}
+  const cols=$('#cols');cols.innerHTML='';cols.style.height=h+'px';
+  for(let d=0;d<7;d++){
+    const col=el('div','col');col.append(el('div','half'));
+    for(const b of blocks(d)){
+      const y=yOf(b.st),hh=yOf(b.e)-y;
+      if(b.s==='past'||b.s==='closed'){const e=el('div','hatch'+(b.s==='past'?' past':''));e.style.top=y+'px';e.style.height=hh+'px';col.append(e);}
+      else if(b.s==='busy'){const e=el('div','ev busy',hh>=44?'已占用':'');e.style.top=y+1+'px';e.style.height=hh-2+'px';col.append(e);}
+      else if(b.s==='open'){const e=el('div','ev '+b.o.c+(b.o.n==='已满'?' full':''),`${b.o.t}<small>${fmt(b.o.s)}–${fmt(b.o.e)} · ${b.o.n}</small>`);e.style.top=y+1+'px';e.style.height=hh-2+'px';col.append(e);}
+      else if(b.s==='free'){const f=el('div','free');f.style.top=y+'px';f.style.height=hh+'px';
+        for(let m=b.st;m<b.e;m+=STEP){const bt=el('button',null,`<span>+ ${fmt(m)}</span>`);bt.title=`${WD[d]} ${fmt(m)}`;bt.onclick=()=>pick(d,m);f.append(bt);}col.append(f);}
+    }
+    if(sel.d===d){const e=el('div','ev sel',`${fmt(sel.s)}–${fmt(sel.s+sel.dur)}<small>${sel.dur} 分钟</small>`);e.style.top=yOf(sel.s)+1+'px';e.style.height=yOf(sel.s+sel.dur)-yOf(sel.s)-2+'px';col.append(e);}
+    cols.append(col);
+  }
+  const now=el('div','now',`<em>${fmt(NOW.m)}</em>`);now.style.top=yOf(NOW.m)+'px';
+  now.style.setProperty('--nowx',`calc((100% - var(--gutter)) * ${NOW.d/7})`);now.style.paddingLeft='0';$('#grid').append(now);
+}
+function panel(){
+  $('#c-day').textContent=`${WD[sel.d]} · 11 月 ${DATE[sel.d]} 日`;
+  $('#c-time').textContent=`${fmt(sel.s)} – ${fmt(sel.s+sel.dur)} · 北京时间`;
+  $('#dur').innerHTML='';
+  for(const x of DURS){const b=el('button',null,x);b.setAttribute('aria-pressed',x===sel.dur);b.title=`${x} 分钟`;b.disabled=!fits(sel.d,sel.s,x);if(b.disabled)b.style.opacity=.35;b.onclick=()=>{sel.dur=x;refresh();};$('#dur').append(b);}
+  $('#sd').innerHTML='';for(let d=NOW.d;d<5;d++){if(![...Array(24).keys()].some(i=>fits(d,H0+i*STEP,30)))continue;const o=el('option',null,`${WD[d]} 11/${DATE[d]}`);o.value=d;o.selected=d===sel.d;$('#sd').append(o);}
+  $('#st').innerHTML='';for(let m=H0;m<H1;m+=STEP){if(!fits(sel.d,m,sel.dur))continue;const o=el('option',null,`${fmt(m)} – ${fmt(m+sel.dur)}`);o.value=m;o.selected=m===sel.s;$('#st').append(o);}
+}
+function refresh(){build();panel();}
+$('#sd').onchange=e=>{const d=+e.target.value,m=[...Array(24).keys()].map(i=>H0+i*STEP).find(m=>fits(d,m,sel.dur)||fits(d,m,30));pick(d,m);};
+$('#st').onchange=e=>pick(sel.d,+e.target.value);
+$('#cp').onclick=()=>{navigator.clipboard?.writeText(`预约申请：${WD[sel.d]} 11 月 ${DATE[sel.d]} 日 ${fmt(sel.s)}–${fmt(sel.s+sel.dur)}（北京时间）`);$('#cp').textContent='已复制';setTimeout(()=>$('#cp').textContent='复制申请文字',1400);};
+$('#go').onclick=()=>{$('#form').innerHTML=`<div class="receipt" role="status"><strong>已收到申请，等待确认</strong>${WD[sel.d]} 11 月 ${DATE[sel.d]} 日 ${fmt(sel.s)}–${fmt(sel.s+sel.dur)}（北京时间）<p class="fine">邀请人确认后会邮件通知你。这是示例原型，没有真正提交。</p></div>`;};
+const q=new URLSearchParams(location.search).get('theme');if(q)document.documentElement.dataset.theme=q;
+$('#theme').onclick=()=>{const r=document.documentElement,dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme:dark)').matches;r.dataset.theme=dark?'light':'dark';};
+addEventListener('resize',()=>refresh());
+refresh();
+</script>
+</body>
+</html>
