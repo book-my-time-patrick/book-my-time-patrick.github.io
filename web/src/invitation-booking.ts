@@ -1,8 +1,11 @@
 import './invitation-booking.css';
 import { parseEmailAddress } from '../../shared/booking';
-import { DEFAULT_RULES, clockOf, expired, ruleClock, ruleDate, ruleTimestamp, shiftDate, validZone } from '../../shared/booking-rules';
+import { DEFAULT_RULES, clockOf, expired, minuteOf, ruleClock, ruleDate, ruleTimestamp, shiftDate, validZone } from '../../shared/booking-rules';
 import type { SlotState } from '../../shared/booking';
 import { copyText, escapeHtml as e } from './ui';
+import { rangeRows, resolveDrag, rowAtY } from './booking-drag';
+import type { DragRange, DragRow } from './booking-drag';
+import { effectiveScheme, getLook, setLook } from './booking-look';
 
 type Availability = 'available' | 'busy' | 'blocked';
 type BookingMode = 'request' | 'direct';
@@ -25,6 +28,13 @@ interface Options {
   showCalendar: boolean; showCity: boolean; hideBusy: boolean; allowRequest: boolean; allowDirect: boolean; allowOpen: boolean; preview: boolean;
   send: (path: string, body?: object, signal?: AbortSignal) => Promise<unknown>;
   unavailable: () => void;
+}
+
+interface Gesture {
+  id: number; touch: boolean; kind: 'create' | 'start' | 'end'; anchor: number;
+  rows: DragRow[]; cells: HTMLElement[]; column: number; table: HTMLTableElement;
+  startX: number; startY: number; x: number; y: number;
+  moved: boolean; active: boolean; timer?: number; range?: DragRange; tip?: HTMLElement; painted: HTMLElement[];
 }
 
 export class InvitationError extends Error {
@@ -100,16 +110,23 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     ${hasCalendar ? `<section class="invitation-card booking-card booking-calendar-card" aria-labelledby="booking-calendar-title">
       <div class="booking-section-head booking-calendar-head">
         <h2 id="booking-calendar-title">预约日历</h2>
-        <div class="booking-view-toggle" role="group" aria-label="日历视图">
-          <button type="button" data-calendar-view="week" aria-pressed="false">周视图</button>
-          <button type="button" data-calendar-view="day" aria-pressed="false">日视图</button>
+        <div class="booking-head-tools">
+          <div class="booking-view-toggle booking-look" role="group" aria-label="外观">
+            <button type="button" data-look-skin="compact" aria-pressed="false">紧凑</button>
+            <button type="button" data-look-skin="apple" aria-pressed="false">苹果</button>
+            <button type="button" class="booking-scheme" data-scheme-toggle aria-label="切换深色或浅色" aria-pressed="false">◐</button>
+          </div>
+          <div class="booking-view-toggle" role="group" aria-label="日历视图">
+            <button type="button" data-calendar-view="week" aria-pressed="false">周视图</button>
+            <button type="button" data-calendar-view="day" aria-pressed="false">日视图</button>
+          </div>
         </div>
       </div>
       ${navigation}
       ${weekFeedback}
       <div class="booking-legend" aria-label="周历图例">
         ${hideBusy ? '' : '<span data-legend-busy hidden><i class="booking-key busy" aria-hidden="true"></i>已占用</span>'}
-        ${hasForm ? '<span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
+        ${hasForm ? '<span><i class="booking-key free" aria-hidden="true"></i>可约</span><span><i class="booking-key selected" aria-hidden="true">✓</i>已选择</span>' : ''}
         ${allowOpen ? '<span><i class="booking-key booking-open-key" aria-hidden="true">◇</i>开放局</span>' : ''}
         <span class="booking-legend-zone" data-booking-zone></span>
       </div>
@@ -117,6 +134,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       <div data-calendar class="booking-calendar" aria-busy="true"></div>
     </section>` : ''}
     ${hasForm ? `<section class="invitation-card booking-card" data-booking-actions aria-labelledby="booking-request-title"${allowRequest ? '' : ' hidden'}>
+      ${hasCalendar ? `<button type="button" class="booking-sheetbar" data-sheetbar aria-expanded="false" aria-controls="booking-sheet-body">
+        <span class="booking-sheetbar-text"><strong data-sheet-title>选择一个时间</strong><small data-sheet-sub></small></span>
+        <span class="booking-sheetbar-action" data-sheet-action aria-hidden="true">填写申请 ↑</span>
+      </button>` : ''}
+      <div class="booking-sheet-body" id="booking-sheet-body">
       <div class="booking-section-head"><div><p class="eyebrow">BOOK A TIME</p><h2 id="booking-request-title" tabindex="-1">预约其他时间</h2></div><span class="booking-zone" data-mode-note>待邀请人确认</span></div>
       ${hasCalendar ? '' : navigation + weekFeedback}
       ${allowRequest && allowDirect ? `<div class="booking-view-toggle booking-mode-toggle" data-booking-modes role="group" aria-label="预约方式" hidden>
@@ -151,6 +173,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
           <label class="booking-manual-copy" data-manual-copy hidden>请手动复制<textarea readonly rows="5"></textarea></label>
         </form>
       </div>
+      </div>
     </section>` : ''}
     ${allowOpen ? '<dialog class="booking-open-dialog invitation-card" aria-labelledby="booking-open-title"><div data-open-content></div></dialog>' : ''}`;
 
@@ -184,6 +207,12 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   const message = root.querySelector<HTMLElement>('[data-request-message]');
   const manualCopy = root.querySelector<HTMLElement>('[data-manual-copy]');
   const copyButton = root.querySelector<HTMLButtonElement>('[data-copy-request]');
+  const lookButtons = [...root.querySelectorAll<HTMLButtonElement>('[data-look-skin]')];
+  const schemeButton = root.querySelector<HTMLButtonElement>('[data-scheme-toggle]');
+  const sheetBar = root.querySelector<HTMLButtonElement>('[data-sheetbar]');
+  const sheetTitle = root.querySelector<HTMLElement>('[data-sheet-title]');
+  const sheetSub = root.querySelector<HTMLElement>('[data-sheet-sub]');
+  const sheetAction = root.querySelector<HTMLElement>('[data-sheet-action]');
 
   let alive = true;
   let week: Week | undefined;
@@ -196,6 +225,10 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   let submitting = false;
   let submitted = false;
   const compactWeek = window.matchMedia('(max-width: 640px)');
+  const coarse = window.matchMedia('(pointer: coarse)');
+  let sheetOpen = false;
+  let gesture: Gesture | undefined;
+  let suppressClickUntil = 0;
   let view: 'week' | 'day' = hasCalendar && compactWeek.matches ? 'day' : 'week';
   let visibleDay = '';
   let selectedDate = '';
@@ -244,6 +277,14 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     message.classList.toggle('error', error);
   }
 
+  const inputHint = () => coarse.matches ? '点按（或长按后上下滑动）' : '点按或按住拖动';
+
+  function syncLook() {
+    const look = getLook();
+    for (const button of lookButtons) button.setAttribute('aria-pressed', String(button.dataset.lookSkin === look.skin));
+    schemeButton?.setAttribute('aria-pressed', String(effectiveScheme(look.scheme) === 'dark'));
+  }
+
   function updateControls() {
     const busy = submitting || openSubmitting;
     const index = week?.days.findIndex(day => day.date === visibleDay) ?? 0;
@@ -272,8 +313,8 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       : `请选择期望时间（${zoneLabel()}），并留下收取回复的邮箱。`;
     if (calendarCaption) {
       let caption = '';
-      if (direct && directSelectable()) caption = '点按可预约的空白时段选择时间。';
-      else if (allowRequest) caption = '点按可申请的时段，由邀请人确认。';
+      if (direct && directSelectable()) caption = `${inputHint()}可预约的空白时段选择时间。`;
+      else if (allowRequest) caption = `${inputHint()}可申请的时段，由邀请人确认。`;
       else if (showCalendar && week && !weekRequest && !availabilityReady()) caption = '忙闲信息暂未同步。';
       if (allowOpen) caption += `${caption ? ' ' : ''}点按开放局查看详情并报名。`;
       calendarCaption.textContent = caption;
@@ -297,6 +338,17 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         : '暂时无法确认在线申请权限。可复制申请文字发给对方。';
       requestState.textContent = notice;
     }
+    const split = hasCalendar && hasForm && Boolean(actionCard) && !actionCard!.hidden;
+    root.classList.toggle('booking-split', split);
+    if (actionCard) actionCard.classList.toggle('is-open', sheetOpen);
+    if (sheetBar && sheetTitle && sheetSub && sheetAction) {
+      sheetBar.setAttribute('aria-expanded', String(sheetOpen));
+      sheetTitle.textContent = selectedStart
+        ? `${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedStart + selectedDuration * minute)}` : '选择一个时间';
+      sheetSub.textContent = selectedStart ? `${selectedDuration} 分钟 · ${zoneLabel()}` : coarse.matches ? '点按，或长按后上下滑动' : '点按或拖动选择';
+      sheetAction.textContent = sheetOpen ? '收起 ↓' : direct ? '填写预约 ↑' : '填写申请 ↑';
+    }
+    syncLook();
     updateOpenControls();
   }
 
@@ -532,6 +584,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
 
   function drawCalendar() {
     if (!week) return;
+    if (gesture) cancelGesture(gesture);
     const instant = now();
     const today = dateAt(instant);
     const days = week.days;
@@ -581,11 +634,16 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       const action = chosen && !selected && mode === 'request' && state !== 'request' ? '，可发邮件申请' : '';
       const label = `${shortDate(day.date)} ${time(startAt)} ${status}${action}`;
       const busy = state === 'busy' && !selected;
-      const joinBefore = busy && row > 0 && !inSelection(startAt - step) && stateAt(slots.get(localMinute - stepMinutes)) === 'busy';
-      const joinAfter = busy && row < rowCount - 1 && !inSelection(startAt + step) && stateAt(slots.get(localMinute + stepMinutes)) === 'busy';
-      const contents = first ? `<span aria-hidden="true">✓ ${time(startAt)}</span>`
+      const inRun = !selected && (state === 'busy' || state === 'request' || state === 'available');
+      const sameRun = (other: Slot | undefined) => Boolean(other) && stateAt(other) === state && !inSelection(other!.startAt)
+        && !sessions.some(item => item.startAt < other!.startAt + step && item.endAt > other!.startAt);
+      const joinBefore = inRun && row > 0 && sameRun(slots.get(localMinute - stepMinutes));
+      const joinAfter = inRun && row < rowCount - 1 && sameRun(slots.get(localMinute + stepMinutes));
+      const handles = chosen && selected && hasForm
+        ? `${first ? '<span class="booking-handle booking-handle-start" data-handle="start" aria-hidden="true"></span>' : ''}${last ? '<span class="booking-handle booking-handle-end" data-handle="end" aria-hidden="true"></span>' : ''}` : '';
+      const contents = (first ? `<span aria-hidden="true">✓ ${time(startAt)}</span>`
         : busy && !joinBefore ? '<span aria-hidden="true">已占用</span>'
-        : chosen && !busy && !selected ? `<span class="booking-slot-time" aria-hidden="true">${time(startAt)}</span>` : '';
+        : chosen && !busy && !selected ? `<span class="booking-slot-time" aria-hidden="true">${time(startAt)}</span>` : '') + handles;
       const classes = `booking-slot ${state}${selected ? ' selected' : ''}${first ? ' selection-first' : ''}${last ? ' selection-last' : ''}${joinBefore ? ' joins-before' : ''}${joinAfter ? ' joins-after' : ''}`;
       return chosen
         ? `<button class="${classes}" type="button" data-slot="${startAt}" title="${label}" aria-label="${label}" aria-pressed="${first}">${contents}</button>`
@@ -596,30 +654,6 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     const selection = showSelection && hasForm && !submitted
       ? `<div class="booking-range-chip"><span><strong>已选择</strong> ${shortDate(selectedDate)} ${time(selectedStart)}–${time(selectedEnd)}</span><button type="button" class="text-button booking-jump" data-jump>${mode === 'direct' ? '填写预约' : '填写申请'} ↓</button></div>`
       : '';
-    if (view === 'week' && compactWeek.matches) {
-      const overview = days.map((day, index) => {
-        const city = cityOf(day);
-        const slots = daySlots.get(day.date)!;
-        const segments = Array.from({ length: rowCount }, (_, index) => {
-          const slot = slots.get(start + index * stepMinutes);
-          if (slot && sessions.some(session => session.startAt < slot.startAt + step && session.endAt > slot.startAt)) return 'booking-open-track';
-          return slot && inSelection(slot.startAt) ? 'selected' : stateAt(slot);
-        });
-        const daySessions = sessions.filter(session => dateAt(session.startAt) === day.date);
-        const state = daySessions.length ? `${daySessions.length} 场开放局` : segments.includes('selected') ? '已选择' : segments.includes('available') ? '有空闲'
-          : segments.includes('busy') ? '有占用' : segments.includes('request') ? '可申请'
-          : segments.every(segment => segment === 'expired') ? '已过期' : '未开放';
-        const title = `${weekdays[index]} ${shortDate(day.date)} ${state}${city ? ` ${city}` : ''}，查看当天`;
-        return `<button type="button" data-open-day="${e(day.date)}" aria-label="${e(title)}"${current(day)}>
-          <span class="booking-overview-date"><strong>${weekdays[index]}</strong>${shortDate(day.date)}${day.date === today ? ' · 今天' : ''}</span>
-          <span class="booking-overview-detail">${cityLabel(day)}</span>
-          <span class="booking-overview-state">${state}<span aria-hidden="true">›</span></span>
-          <span class="booking-overview-track" aria-hidden="true">${segments.map(segment => `<i class="${segment}"></i>`).join('')}</span>
-        </button>`;
-      }).join('');
-      calendar.innerHTML = `<div class="booking-week-overview" role="group" aria-label="本周各日概览">${overview}</div>${openSessionList(days)}${selection}`;
-      return;
-    }
     const dayView = view === 'day';
     const visibleDays = dayView ? [currentDay] : days;
     const column = (day: Day) => !dayView && days.indexOf(day) >= 5 ? ' class="booking-weekend"' : '';
@@ -631,7 +665,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     }).join('');
     calendar.innerHTML = `
       ${dayView ? `<div class="booking-days" role="group" aria-label="本周日期">${days.map((day, index) => `<button type="button" data-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}" aria-pressed="${day === currentDay}"${current(day)}>${dayLabel(day, index)}</button>`).join('')}</div>` : ''}
-      <table class="booking-time-grid ${dayView ? 'booking-day-grid' : 'booking-week-grid'}" aria-label="${dayView ? '当日' : '本周'}时间网格（${zoneLabel()}）">
+      <table class="booking-time-grid ${dayView ? 'booking-day-grid' : 'booking-week-grid'}" data-step="${stepMinutes}" aria-label="${dayView ? '当日' : '本周'}时间网格（${zoneLabel()}）">
         <thead>
           ${dayView ? '' : `<tr><th scope="col">时间</th>${days.map((day, index) => `<th scope="col"${column(day)}>
             <button type="button" data-open-day="${e(day.date)}" aria-label="${weekdays[index]} ${shortDate(day.date)}，查看当天"${current(day)}>${dayLabel(day, index)}</button>
@@ -640,6 +674,32 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
         </thead>
         <tbody>${rows}</tbody>
       </table>${selection}`;
+    placeNowLine();
+  }
+
+  function placeNowLine() {
+    calendar?.querySelector('.booking-now')?.remove();
+    if (!week || !calendar) return;
+    const instant = now();
+    const today = dateAt(instant);
+    if (view === 'day' ? visibleDay !== today : !week.days.some(day => day.date === today)) return;
+    const { start, end, stepMinutes } = week.grid;
+    const minuteNow = minuteOf(time(instant));
+    if (minuteNow < start || minuteNow >= end) return;
+    const table = calendar.querySelector<HTMLTableElement>('table');
+    const row = table?.tBodies[0]?.rows[Math.floor((minuteNow - start) / stepMinutes)];
+    const firstCell = row?.cells[1];
+    if (!table || !row || !firstCell) return;
+    const frame = calendar.getBoundingClientRect(), rowBox = row.getBoundingClientRect();
+    const cellBox = firstCell.getBoundingClientRect(), tableBox = table.getBoundingClientRect();
+    const line = document.createElement('div');
+    line.className = 'booking-now';
+    line.setAttribute('aria-hidden', 'true');
+    line.innerHTML = `<span>${time(instant)}</span>`;
+    line.style.top = `${rowBox.top - frame.top + rowBox.height * (((minuteNow - start) % stepMinutes) / stepMinutes)}px`;
+    line.style.left = `${cellBox.left - frame.left}px`;
+    line.style.width = `${tableBox.right - cellBox.left}px`;
+    calendar.append(line);
   }
 
   function syncSelection() { syncForm(); drawCalendar(); updateControls(); }
@@ -772,6 +832,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     syncSelection();
   });
   calendar?.addEventListener('click', event => {
+    if (performance.now() < suppressClickUntil) { event.preventDefault(); return; }
     if (submitting || openSubmitting) return;
     const target = (event.target as Element).closest<HTMLButtonElement>('button');
     if (!target) return;
@@ -786,9 +847,188 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       choose(startAt);
       calendar.querySelector<HTMLButtonElement>(`[data-slot="${startAt}"]`)?.focus({ preventScroll: true });
     } else if (target.hasAttribute('data-jump')) {
+      sheetOpen = true;
+      updateControls();
       actionTitle?.focus();
     }
   });
+
+  // ---- Drag to select. Mouse: press and drag. Touch: long-press, then slide (plain swipes still scroll).
+  // The handles on the selected block resize it with either input.
+  function chooseRange(startAt: number, duration: number) {
+    const date = dateAt(startAt);
+    if (!availableSlots(week?.days.find(day => day.date === date)).some(slot => slot.startAt === startAt)) return;
+    selectedDate = date; visibleDay = date; selectedStart = startAt; selectedDuration = duration;
+    showRequestMessage('');
+    syncSelection();
+  }
+
+  const allowedDurations = (slot: Slot) => (week?.durations ?? []).filter(length => (mode === 'direct' ? slot.bookableDurations : slot.requestDurations)?.includes(length));
+
+  function beginGesture(event: PointerEvent, slotEl: HTMLElement, kind: Gesture['kind']): Gesture | undefined {
+    if (!week) return undefined;
+    const startAt = Number(slotEl.dataset.slot);
+    const day = week.days.find(item => item.date === dateAt(startAt));
+    const cell = slotEl.closest('td');
+    const table = slotEl.closest('table');
+    if (!day || !cell || !table) return undefined;
+    const { start, stepMinutes } = week.grid;
+    const byMinute = new Map(day.slots.map(slot => [slot.localMinute, slot] as const));
+    const sessions = openSessions();
+    const step = stepMs();
+    const rows: DragRow[] = [];
+    const cells: HTMLElement[] = [];
+    [...table.tBodies[0].rows].forEach((tr, index) => {
+      const slot = byMinute.get(start + index * stepMinutes);
+      const covered = !slot || sessions.some(item => item.startAt < slot.startAt + step && item.endAt > slot.startAt);
+      const selectable = !covered && canChoose(slot!);
+      rows.push({ startAt: slot?.startAt ?? 0, selectable, durations: selectable ? allowedDurations(slot!) : [] });
+      cells.push(tr.cells[cell.cellIndex].firstElementChild as HTMLElement);
+    });
+    const indexOf = (at: number) => rows.findIndex(row => row.startAt === at);
+    const lastSelected = selectedStart + selectedDuration * minute - step;
+    const anchor = kind === 'start' ? indexOf(lastSelected) : kind === 'end' ? indexOf(selectedStart) : indexOf(startAt);
+    if (anchor < 0) return undefined;
+    return {
+      id: event.pointerId, touch: event.pointerType === 'touch', kind, anchor, rows, cells, column: cell.cellIndex, table,
+      startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY,
+      moved: kind !== 'create', active: false, painted: [],
+    };
+  }
+
+  function gestureRow(g: Gesture) {
+    const boxes = g.cells.map(cell => cell.parentElement!.getBoundingClientRect());
+    return rowAtY(boxes.map(box => box.top), boxes.map(box => box.bottom), g.y);
+  }
+
+  function clearPreview(g: Gesture) {
+    for (const el of g.painted) el.classList.remove('drag-preview', 'drag-first', 'drag-last', 'drag-origin');
+    g.painted = [];
+  }
+
+  function updateGesture(g: Gesture) {
+    if (!week || !calendar) return;
+    const row = gestureRow(g);
+    if (row !== g.anchor) g.moved = true;
+    g.range = resolveDrag(g.rows, g.anchor, row, week.grid.stepMinutes, selectedDuration, g.moved);
+    clearPreview(g);
+    const origin = g.cells[g.anchor];
+    origin?.classList.add('drag-origin');
+    if (origin) g.painted.push(origin);
+    if (g.range) {
+      const covered = rangeRows(g.range, week.grid.stepMinutes);
+      covered.forEach((index, order) => {
+        const el = g.cells[index];
+        if (!el) return;
+        el.classList.add('drag-preview');
+        if (order === 0) el.classList.add('drag-first');
+        if (order === covered.length - 1) el.classList.add('drag-last');
+        g.painted.push(el);
+      });
+    }
+    if (g.tip) {
+      g.tip.hidden = !g.range;
+      if (g.range) {
+        const startAt = g.rows[g.range.index].startAt;
+        g.tip.textContent = `${time(startAt)}–${time(startAt + g.range.duration * minute)} · ${g.range.duration} 分钟`;
+      }
+      const frame = calendar.getBoundingClientRect();
+      g.tip.style.left = `${Math.min(Math.max(g.x - frame.left, 64), Math.max(64, frame.width - 64))}px`;
+      g.tip.style.top = `${g.y - frame.top - (g.touch ? 56 : 30)}px`;
+    }
+  }
+
+  function activateGesture(g: Gesture) {
+    if (g.active || !calendar) return;
+    g.active = true;
+    window.clearTimeout(g.timer);
+    try { calendar.setPointerCapture(g.id); } catch { /* Capture only improves tracking. */ }
+    document.body.classList.add('booking-dragging');
+    if (g.touch && 'vibrate' in navigator) navigator.vibrate(12);
+    g.tip = document.createElement('div');
+    g.tip.className = 'booking-drag-tip';
+    g.tip.setAttribute('aria-hidden', 'true');
+    calendar.append(g.tip);
+    updateGesture(g);
+  }
+
+  function cancelGesture(g: Gesture) {
+    window.clearTimeout(g.timer);
+    clearPreview(g);
+    g.tip?.remove();
+    document.body.classList.remove('booking-dragging');
+    try { if (calendar?.hasPointerCapture(g.id)) calendar.releasePointerCapture(g.id); } catch { /* Already released. */ }
+    if (gesture === g) gesture = undefined;
+  }
+
+  function finishGesture(g: Gesture) {
+    const range = g.range;
+    const startAt = range ? g.rows[range.index].startAt : 0;
+    cancelGesture(g);
+    if (!range) return;
+    suppressClickUntil = performance.now() + 400;
+    chooseRange(startAt, range.duration);
+    calendar?.querySelector<HTMLElement>(`[data-slot="${startAt}"]`)?.focus({ preventScroll: true });
+  }
+
+  calendar?.addEventListener('pointerdown', event => {
+    if (gesture || submitting || openSubmitting || submitted || !week || !event.isPrimary) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const target = event.target as Element;
+    const slotEl = target.closest<HTMLElement>('[data-slot]');
+    if (!slotEl) return;
+    const handle = target.closest<HTMLElement>('[data-handle]');
+    const g = beginGesture(event, slotEl, handle ? (handle.dataset.handle === 'start' ? 'start' : 'end') : 'create');
+    if (!g) return;
+    gesture = g;
+    if (g.kind !== 'create') {
+      event.preventDefault();
+      activateGesture(g);
+    } else if (g.touch) {
+      g.timer = window.setTimeout(() => { if (gesture === g) activateGesture(g); }, 260);
+    }
+  });
+  calendar?.addEventListener('pointermove', event => {
+    const g = gesture;
+    if (!g || event.pointerId !== g.id) return;
+    g.x = event.clientX;
+    g.y = event.clientY;
+    if (g.active) { updateGesture(g); return; }
+    // Touch: any real movement before the long-press means the user is scrolling.
+    if (g.touch) { if (Math.hypot(g.x - g.startX, g.y - g.startY) > 10) cancelGesture(g); return; }
+    // Mouse: start once the pointer leaves the row it went down on.
+    if (gestureRow(g) !== g.anchor) activateGesture(g);
+  });
+  const onPointerEnd = (event: PointerEvent) => {
+    const g = gesture;
+    if (!g || event.pointerId !== g.id) return;
+    if (event.type === 'pointerup' && g.active) finishGesture(g);
+    else cancelGesture(g);
+  };
+  window.addEventListener('pointerup', onPointerEnd);
+  window.addEventListener('pointercancel', onPointerEnd);
+  // Once a long-press has started a selection, stop the page from scrolling under the finger.
+  calendar?.addEventListener('touchmove', event => { if (gesture?.active && event.cancelable) event.preventDefault(); }, { passive: false });
+  calendar?.addEventListener('contextmenu', event => { if (gesture) event.preventDefault(); });
+  calendar?.addEventListener('selectstart', event => { if (gesture) event.preventDefault(); });
+
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    if (gesture) { cancelGesture(gesture); return; }
+    if (sheetOpen) { sheetOpen = false; updateControls(); }
+  }
+  document.addEventListener('keydown', onKeydown);
+
+  for (const button of lookButtons) button.addEventListener('click', () => {
+    setLook({ skin: button.dataset.lookSkin === 'apple' ? 'apple' : 'compact' });
+    syncLook();
+    placeNowLine();
+  });
+  schemeButton?.addEventListener('click', () => {
+    setLook({ scheme: effectiveScheme() === 'dark' ? 'light' : 'dark' });
+    syncLook();
+  });
+  sheetBar?.addEventListener('click', () => { sheetOpen = !sheetOpen; updateControls(); });
 
   dateField?.addEventListener('change', () => {
     selectedDate = dateField.value; visibleDay = selectedDate || visibleDay; selectedStart = 0;
@@ -912,7 +1152,7 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
   });
 
   function refreshClock() {
-    if (!alive || !week || submitting || openSubmitting || document.hidden) return;
+    if (!alive || !week || submitting || openSubmitting || document.hidden || gesture?.active) return;
     if (week.days.at(-1)!.date < dateAt(now())) { void loadWeek(0); return; }
     if (!weekRequest && weekVerified && week.availability === 'ready' && week.validUntil !== undefined && now() >= week.validUntil) {
       void loadWeek(week.week);
@@ -924,11 +1164,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
       scheduleExpiry();
     }
     const tick = Math.floor((now() + week.grid.leadMinutes * minute) / stepMs());
-    if (tick !== lastTick) { lastTick = tick; syncSelection(); }
+    if (tick !== lastTick) { lastTick = tick; syncSelection(); } else placeNowLine();
     if (!weekRequest && weekVerified && performance.now() - readAt >= 60_000) void loadWeek(week.week, undefined, true);
   }
-  const redrawWeek = () => { if (view === 'week') drawCalendar(); };
-  if (hasCalendar) compactWeek.addEventListener('change', redrawWeek);
+  const onResize = () => { if (!gesture) placeNowLine(); };
+  window.addEventListener('resize', onResize);
   const timer = window.setInterval(refreshClock, 30_000);
   document.addEventListener('visibilitychange', refreshClock);
   void loadWeek(0);
@@ -942,7 +1182,11 @@ export function renderInvitationBooking(root: HTMLElement, options: Options): ()
     if (calendarDownload) URL.revokeObjectURL(calendarDownload);
     openDialog?.close();
     openDialog?.remove();
-    if (hasCalendar) compactWeek.removeEventListener('change', redrawWeek);
+    window.removeEventListener('resize', onResize);
+    window.removeEventListener('pointerup', onPointerEnd);
+    window.removeEventListener('pointercancel', onPointerEnd);
+    document.removeEventListener('keydown', onKeydown);
+    if (gesture) cancelGesture(gesture);
     window.clearTimeout(expiryTimer);
     window.clearInterval(timer);
     document.removeEventListener('visibilitychange', refreshClock);
