@@ -1,4 +1,5 @@
 import './admin.css';
+import { registerLookTarget } from './booking-look';
 import { InvitationError, renderInvitationBooking } from './invitation-booking';
 import { escapeHtml as e, formatTime, moduleNames } from './ui';
 
@@ -14,6 +15,7 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
   const controller = new AbortController();
   let alive = true;
   let localToken = token;
+  let disposeLook: (() => void) | undefined;
   let disposeBooking: (() => void) | undefined;
   async function send(path: string, body?: object, signal?: AbortSignal): Promise<unknown> {
     if (!__API_BASE_URL__) throw new Error('API unavailable');
@@ -45,6 +47,8 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
   function unavailable() {
     if (!alive) return;
     disposeBooking?.();
+    disposeLook?.();
+    disposeLook = undefined;
     root.innerHTML = '<main class="gate"><p class="eyebrow">BY INVITATION</p><h1>链接暂时无法使用</h1><p class="gate-copy">请向邀请人获取可用的邀请链接。</p><span class="gate-rule" aria-hidden="true"></span><p class="gate-note">PRIVATE APPOINTMENTS</p></main>';
   }
   async function load() {
@@ -73,6 +77,8 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
         ${modules.length ? `<div class="invitation-grid">${modules.map(name => `<section class="invitation-card"><h2>${e(moduleNames[name])}</h2>${shown[name] ? `<p class="invitation-text">${e(shown[name])}</p>` : '<p>该内容正在准备中。</p>'}</section>`).join('')}</div>` : ''}
         <footer class="admin-footer">专属邀请仅供受邀者使用，请勿公开转发。</footer>
       </main>`;
+      disposeLook?.();
+      disposeLook = registerLookTarget(root.querySelector<HTMLElement>('.invitation-page')!);
       if (showBooking) {
         disposeBooking = renderInvitationBooking(root.querySelector<HTMLElement>('#invitation-booking')!, {
           showCalendar, showCity, hideBusy: invitation.permissions.hideBusy === true, allowRequest, allowDirect, allowOpen,
@@ -91,5 +97,5 @@ export function renderInvitation(root: HTMLElement, token: string): () => void {
     root.querySelector('#retry-invitation')!.addEventListener('click', () => void load());
   }
   void load();
-  return () => { alive = false; localToken = ''; controller.abort(); disposeBooking?.(); root.replaceChildren(); };
+  return () => { alive = false; localToken = ''; controller.abort(); disposeBooking?.(); disposeLook?.(); root.replaceChildren(); };
 }
